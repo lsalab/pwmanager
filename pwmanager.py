@@ -3,8 +3,14 @@
 
 import os
 import sys
-import json
 import tkinter as tk
+from Crypto.Hash import SHA256
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+from base64 import b64encode, b64decode
+from json import dumps, loads
+
 
 class InitialConfig():
 
@@ -44,7 +50,7 @@ class InitialConfig():
             sticky=tk.E
         )
         pp2.bind('<Key>', self.verify)
-        ppstat = self.ppstat = tk.Label(top, text ='')
+        ppstat = self.ppstat = tk.Label(top, text ='', fg='red')
         ppstat.grid(
             row=3,
             column=0,
@@ -73,12 +79,26 @@ class InitialConfig():
             b = self.pp1
         if len(a.get()) >= 0 and a.get() + event.char == b.get():
             self.okbtn.config(state=tk.NORMAL)
+            self.ppstat.config(text='')
             return True
         else:
             self.okbtn.config(state=tk.DISABLED)
+            self.ppstat.config(text='Passphrase does not match')
             return False
 
     def ok(self):
+        config = {}
+        config['store'] = {}
+        passphrase = self.pp1.get()
+        key = SHA256.new(data=passphrase.encode('utf-8'))
+        challenge = ''
+        for c in passphrase:
+            challenge += chr(ord(c) ^ 0xff)
+        challenge = SHA256.new(data=challenge.encode('utf-8')).digest()
+        iv = get_random_bytes(16)
+        config['iv'] = b64encode(iv).decode('utf-8')
+        cipher = AES.new(key.digest(), AES.MODE_CBC, iv=iv)
+        config['challenge'] = b64encode(cipher.encrypt(pad(challenge, AES.block_size))).decode('utf-8')
         self.top.grab_release()
         self.top.destroy()
 
