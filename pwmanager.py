@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=line-too-long,invalid-name
 'Simple password manager'
 
 import os
@@ -12,6 +13,9 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 
 class InitialConfig():
+    """
+    Initial configuration dialog
+    """
 
     def __init__(self, parent):
         top = self.top = tk.Toplevel(parent)
@@ -49,7 +53,7 @@ class InitialConfig():
             sticky=tk.E
         )
         pp2.bind('<Key>', self.verify)
-        ppstat = self.ppstat = tk.Label(top, text ='', fg='red')
+        ppstat = self.ppstat = tk.Label(top, text='', fg='red')
         ppstat.grid(
             row=3,
             column=0,
@@ -66,13 +70,13 @@ class InitialConfig():
         self.key = None
         self.challenge = None
         top.grab_set()
-        top.protocol('WM_DELETE_WINDOW', self.wmWinclose)
-
-    def wmWinclose(self):
-        pass
-        self.ok()
+        top.wm_attributes('-topmost', True)
+        top.protocol('WM_DELETE_WINDOW', self.ok)
 
     def verify(self, event):
+        """
+        Chacks whether both passphrases are the same
+        """
         a = event.widget
         if a == self.pp1:
             b = self.pp2
@@ -88,6 +92,16 @@ class InitialConfig():
             return False
 
     def ok(self):
+        """
+        Creates (if needed) the datastore and locks it with the given passphrase
+
+        Encryption key is the SHA256 digest of passphrase, as bytes
+
+        A challenge generated as the SHA256 digest of the ones complement of the passphrase.
+        The challenge is encrypted using AES-256 in CBC mode with a random 128-bit IV and the key.
+
+        Challenge = AES256(IV, Key, SHA256(CONCAT(i XOR 0xFF for i in passphrase)))
+        """
         config = {}
         config['store'] = {}
         passphrase = self.pp1.get()
@@ -108,6 +122,9 @@ class InitialConfig():
         self.top.destroy()
 
 class AskPassphrase():
+    """
+    Dialog window used to unlock the datastore.
+    """
 
     def __init__(self, parent):
         top = self.top = tk.Toplevel(parent)
@@ -136,9 +153,12 @@ class AskPassphrase():
         self.key = None
         self.challenge = None
         top.grab_set()
-    
-    def ok(self):
-        if len(self.pp.get()) > 0:
+        top.wm_attributes('-topmost', True)
+        pp.focus_set()
+        pp.bind('<Return>', self.ok)
+
+    def ok(self, event=None): # pylint: disable=unused-argument
+        if self.pp.get():
             self.key = SHA256.new(data=self.pp.get().encode('utf-8')).digest()
             self.challenge = ''
             for c in self.pp.get():
@@ -167,42 +187,54 @@ def main():
         key = askkey.key
         uchall = askkey.challenge
     try:
+        assert key is not None
         assert len(key) == 32
-        datastore = loads(open('./data/store.pws').read())
-        iv = b64decode(datastore['iv'])
-        lcipher = AES.new(key, AES.MODE_CBC, iv=iv)
-        challenge = unpad(lcipher.decrypt(b64decode(datastore['challenge'])), AES.block_size)
-        assert uchall == challenge
-        lcipher = None
-        challenge = None
-        uchall = None
-        sys.stderr.write('Datastore unlocked')
-        # Menus
-        menu = tk.Menu(master=root)
-        root.config(menu=menu)
-        filemenu = tk.Menu(master=menu)
-        menu.add_cascade(label='File', menu=filemenu)
-        filemenu.add_command(label='Exit', command=sys.exit)
-        # Toolbar
-        toolbar = tk.Frame(root)
-        addbtn = tk.Button(toolbar, text='Add', width=6, command=lambda: print('TODO'))
-        addbtn.pack(side=tk.LEFT, padx=2, pady=2)
-        delbtn = tk.Button(toolbar, text='Remove', width=6, command=lambda: print('TODO'))
-        delbtn.pack(side=tk.LEFT, padx=2, pady=2)
-        toolbar.pack(side=tk.TOP, fill=tk.X)
-        # List box
-        listframe = tk.Frame(master=root)
-        listsb = tk.Scrollbar(master=listframe, orient=tk.VERTICAL)
-        listbox = tk.Listbox(master=listframe, selectmode=tk.SINGLE, yscrollcommand=listsb.set)
-        listsb.config(command=listbox.yview)
-        for k in datastore['store'].keys():
-            listbox.insert(tk.END, k)
-        listsb.pack(side=tk.RIGHT, fill=tk.Y)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
-        listframe.pack(fill=tk.BOTH, expand=1, padx=4, pady=4)
-        root.mainloop()
     except AssertionError:
-        sys.stderr.write('Assertion error: Empty or incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+        sys.stderr.write('Empty passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+        sys.exit()
+    datastore = loads(open('./data/store.pws').read())
+    iv = b64decode(datastore['iv'])
+    lcipher = AES.new(key, AES.MODE_CBC, iv=iv)
+    challenge = b64decode(datastore['challenge'])
+    challenge = lcipher.decrypt(challenge)
+    try:
+        challenge = unpad(challenge, AES.block_size)
+        assert uchall == challenge
+    except ValueError:
+        sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+        sys.exit()
+    except AssertionError:
+        sys.stderr.write('ERROR: Corrupted datastore\r\n\r\n')
+        sys.exit()
+    lcipher = None
+    challenge = None
+    uchall = None
+    print('Datastore unlocked')
+    root.wm_attributes('-topmost', True)
+    # Menus
+    menu = tk.Menu(master=root)
+    root.config(menu=menu)
+    filemenu = tk.Menu(master=menu)
+    menu.add_cascade(label='File', menu=filemenu)
+    filemenu.add_command(label='Exit', command=sys.exit)
+    # Toolbar
+    toolbar = tk.Frame(root)
+    addbtn = tk.Button(toolbar, text='Add', width=6, command=lambda: print('TODO'))
+    addbtn.pack(side=tk.LEFT, padx=2, pady=2)
+    delbtn = tk.Button(toolbar, text='Remove', width=6, command=lambda: print('TODO'))
+    delbtn.pack(side=tk.LEFT, padx=2, pady=2)
+    toolbar.pack(side=tk.TOP, fill=tk.X)
+    # List box
+    listframe = tk.Frame(master=root)
+    listsb = tk.Scrollbar(master=listframe, orient=tk.VERTICAL)
+    listbox = tk.Listbox(master=listframe, selectmode=tk.SINGLE, yscrollcommand=listsb.set)
+    listsb.config(command=listbox.yview)
+    for k in datastore['store'].keys():
+        listbox.insert(tk.END, k)
+    listsb.pack(side=tk.RIGHT, fill=tk.Y)
+    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+    listframe.pack(fill=tk.BOTH, expand=1, padx=4, pady=4)
+    root.mainloop()
 
 if __name__ == '__main__':
     main()
