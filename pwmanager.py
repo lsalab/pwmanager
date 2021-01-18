@@ -337,6 +337,17 @@ def copyToClipboard(master: tk.Tk, listbox: ttk.Treeview, val: int):
         print('Unknown header')
     master.update()
 
+def searchCallback(datastore: dict, key:bytes, guilist: ttk.Treeview, value: tk.StringVar):
+    for c in guilist.get_children():
+        guilist.delete(c)
+    for k in [x for x in datastore['store'].keys() if value.get().lower() in x.lower()]:
+        entry = deepcopy(datastore['store'][k])
+        entry_cipher = AES.new(key, AES.MODE_CBC, iv=b64decode(entry['iv']))
+        entry_data = entry_cipher.decrypt(b64decode(entry['data']))
+        entry_data = unpad(entry_data, AES.block_size)
+        entry_data = loads(entry_data.decode('utf-8'))
+        guilist.insert('', tk.END, values=(deepcopy(k), deepcopy(entry_data['username']), deepcopy(entry_data['password'])))
+
 def main():
     'Main entry point'
 
@@ -398,6 +409,11 @@ def main():
     delbtn.pack(side=tk.LEFT, padx=2, pady=2)
     edtbtn = tk.Button(toolbar, text='Edit', width=6)
     edtbtn.pack(side=tk.LEFT, padx=2, pady=2)
+    schlbl = tk.Label(toolbar, text='Search:', width=8)
+    schlbl.pack(side=tk.LEFT, padx=2, pady=2)
+    schvar = tk.StringVar(master=toolbar)
+    schety = tk.Entry(master=toolbar, width=32, textvariable=schvar)
+    schety.pack(side=tk.LEFT, padx=2)
     cubtn = tk.Button(toolbar, text='Copy username', width=12)
     cubtn.pack(side=tk.RIGHT, padx=2, pady=2)
     cpbtn = tk.Button(toolbar, text='Copy password', width=12)
@@ -429,6 +445,8 @@ def main():
     edtbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_EDT))
     cubtn.config(command=lambda: copyToClipboard(root, listbox, CB_USER))
     cpbtn.config(command=lambda: copyToClipboard(root, listbox, CB_PASS))
+    # Search entry callback
+    schvar.trace('w', lambda var, idx, mode, ds=datastore, k=key, lst=listbox, sv=schvar: searchCallback(ds, k, lst, sv))
     root.mainloop()
     saveDatastore(datastore)
 
