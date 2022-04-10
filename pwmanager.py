@@ -148,8 +148,8 @@ class AskPassphrase():
         pp.grid(row=1, column=0, padx=2, pady=2)
         okbtn = self.okbtn = tk.Button(top, text="OK", command=self.ok)
         okbtn.grid(row=4, column=0, columnspan=2, padx=2, pady=2)
-        self.__key = None
-        self.__challenge = None
+        self.__key = b''
+        self.__challenge = b''
         pp.focus_set()
         pp.bind('<Return>', self.ok)
         top.grab_set()
@@ -158,7 +158,7 @@ class AskPassphrase():
 
     @property
     def key(self) -> bytes:
-        return bytes(self.__key)
+        return self.__key
 
     @key.setter
     def key(self, value: bytes):
@@ -167,7 +167,7 @@ class AskPassphrase():
 
     @property
     def challenge(self) -> bytes:
-        return bytes(self.__challenge)
+        return self.__challenge
 
     @challenge.setter
     def challenge(self, value: bytes):
@@ -177,10 +177,10 @@ class AskPassphrase():
     def ok(self, event=None): # pylint: disable=unused-argument
         if self.pp.get():
             self.__key = SHA256.new(data=self.pp.get().encode('utf-8')).digest()
-            self.__challenge = ''
+            bufferstr = ''
             for c in self.pp.get():
-                self.__challenge += chr(ord(c) ^ 0xff)
-            self.__challenge = SHA256.new(data=self.__challenge.encode('utf-8')).digest()
+                bufferstr += chr(ord(c) ^ 0xff)
+            self.__challenge = SHA256.new(data=bufferstr.encode('utf-8')).digest()
             self.top.grab_release()
             self.top.destroy()
 
@@ -192,6 +192,7 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         self.__site = tk.StringVar(master=top)
         self.__username = tk.StringVar(master=top)
         self.__password = tk.StringVar(master=top)
+        self.__okpressed = False
         tk.Label(master=top, text='Site:').grid(
             row=0, column=0,
             padx=2, pady=2
@@ -216,7 +217,9 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         pe.bind('<FocusIn>', lambda evt: self.pe.config(show=''))
         pe.bind('<FocusOut>', lambda evt: self.pe.config(show='*'))
         okbtn = self.okbtn = tk.Button(top, text="OK", command=self.ok)
-        okbtn.grid(row=3, column=0, columnspan=2, padx=2, pady=2)
+        okbtn.grid(row=3, column=2, columnspan=1, padx=10, pady=2, sticky='ew')
+        genbtn = self.genbtn = tk.Button(top, text="Generate", command=self.__generate)
+        genbtn.grid(row=3, column=1, columnspan=1, padx=2, pady=2, sticky='ew')
         if 'site' in kwargs:
             self.__site.set(kwargs['site'])
         if 'username' in kwargs:
@@ -226,7 +229,7 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         top.grab_set()
         top.wm_attributes('-topmost', True)
         se.focus_set()
-        top.protocol('WM_DELETE_WINDOW', self.ok)
+        top.protocol('WM_DELETE_WINDOW', self.__done)
 
     @property
     def site(self) -> str:
@@ -261,9 +264,24 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         else:
             self.__password.set('')
 
-    def ok(self, event=None): # pylint: disable=unused-argument
+    @property
+    def okpressed(self) -> bool:
+        return self.__okpressed
+    
+    @okpressed.setter
+    def okpressed(self, value: bool=False):
+        self.__okpressed = value
+
+    def __done(self, event=None):
         self.top.grab_release()
         self.top.destroy()
+
+    def __generate(self):
+        self.password = b64encode(get_random_bytes(24)).decode('utf-8')
+
+    def ok(self, event=None): # pylint: disable=unused-argument
+        self.__okpressed = True
+        self.__done()
 
 def handlePw(master: tk.Tk, datastore: dict, key: bytes, guilist: ttk.Treeview, action: int):
     if action in [PW_ADD, PW_EDT]:
@@ -271,7 +289,7 @@ def handlePw(master: tk.Tk, datastore: dict, key: bytes, guilist: ttk.Treeview, 
         if action == PW_ADD:
             pwd = PWDiag(master)
         else:
-            if guilist.focus() is '':
+            if guilist.focus() == '':
                 return
             itemid = guilist.selection()[0]
             sel_item = guilist.item(itemid)
@@ -289,21 +307,22 @@ def handlePw(master: tk.Tk, datastore: dict, key: bytes, guilist: ttk.Treeview, 
             del opass
             del sel_item
         master.wait_window(pwd.top)
-        datastore.pop(pwd.site, None)
-        entry = {}
-        entry_iv = get_random_bytes(16)
-        entry_cipher = AES.new(key, AES.MODE_CBC, iv=entry_iv)
-        entry['iv'] = b64encode(entry_iv).decode('utf-8')
-        entry_data = {}
-        entry_data['username'] = pwd.username
-        entry_data['password'] = pwd.password
-        entry_data = dumps(entry_data).encode('utf-8')
-        entry_data = entry_cipher.encrypt(pad(entry_data, AES.block_size))
-        entry['data'] = b64encode(entry_data).decode('utf-8')
-        datastore['store'][pwd.site] = deepcopy(entry)
-        guilist.insert('', tk.END, values=(deepcopy(pwd.site), deepcopy(pwd.username), deepcopy(pwd.password)))
+        if pwd.okpressed and pwd.site.strip() != '':
+            datastore.pop(pwd.site, None)
+            entry = {}
+            entry_iv = get_random_bytes(16)
+            entry_cipher = AES.new(key, AES.MODE_CBC, iv=entry_iv)
+            entry['iv'] = b64encode(entry_iv).decode('utf-8')
+            entry_data = {}
+            entry_data['username'] = pwd.username
+            entry_data['password'] = pwd.password
+            entry_data = dumps(entry_data).encode('utf-8')
+            entry_data = entry_cipher.encrypt(pad(entry_data, AES.block_size))
+            entry['data'] = b64encode(entry_data).decode('utf-8')
+            datastore['store'][pwd.site] = deepcopy(entry)
+            guilist.insert('', tk.END, values=(deepcopy(pwd.site), deepcopy(pwd.username), deepcopy(pwd.password)))
     elif action == PW_DEL:
-        if guilist.focus() is '':
+        if guilist.focus() == '':
             return
         itemid = guilist.selection()[0]
         site = guilist.item(itemid)['values'][0]
