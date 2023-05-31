@@ -387,10 +387,10 @@ def main():
         key = askkey.key
         uchall = askkey.challenge
     try:
-        assert key is not None
-        assert len(key) == 32
-    except AssertionError:
-        sys.stderr.write('Empty passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+        assert key is not None, 'No key provided'
+        assert len(key) == 32, 'Incorrect key length'
+    except AssertionError as e:
+        sys.stderr.write(f'Key error: {str(e)}\r\nERROR: Unable to unlock datastore\r\n\r\n')
         sys.exit()
     datastore = loads(open('./data/store.pws').read())
     iv = b64decode(datastore['iv'])
@@ -399,12 +399,12 @@ def main():
     challenge = lcipher.decrypt(challenge)
     try:
         challenge = unpad(challenge, AES.block_size)
-        assert uchall == challenge
+        assert uchall == challenge, 'Challenge mismatch'
     except ValueError:
         sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
         sys.exit()
-    except AssertionError:
-        sys.stderr.write('ERROR: Corrupted datastore\r\n\r\n')
+    except AssertionError as e:
+        sys.stderr.write(f'ERROR: Corrupted datastore\r\nChallenge error: {str(e)}\r\n\r\n')
         sys.exit()
     lcipher = None
     challenge = None
