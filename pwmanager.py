@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # pylint: disable=line-too-long
-'Simple password manager'
+"""
+Simple password manager with support for multiple cryptographic modes.
+
+This password manager stores website passwords encrypted with AES-256.
+It supports two secure cipher modes:
+- GCM (Galois/Counter Mode): Default for new datastores, provides authenticated encryption
+- CBC (Cipher Block Chaining): Legacy mode, supported for backward compatibility
+
+The encryption key is derived from a user passphrase using SHA-256.
+Each datastore includes cryptographic parameters (cipher and mode) for flexibility.
+"""
 
 import os
 import sys
@@ -46,6 +56,14 @@ AES_BLOCK_SIZE = 16
 AES_KEY_SIZE = 32
 PASSWORD_LENGTH = 24
 
+# Cryptographic defaults
+LEGACY_CIPHER = 'AES'
+LEGACY_CIPHER_MODE = 'CBC'
+
+# Default cryptographic parameters for new datastores (most secure)
+DEFAULT_CIPHER = 'AES'
+DEFAULT_CIPHER_MODE = 'GCM'
+
 def validate_store_path(path: str) -> bool:
     """
     Validate that the store path is safe to use.
@@ -54,7 +72,6 @@ def validate_store_path(path: str) -> bool:
     if not path:
         return False
     
-    # Check for dangerous patterns
     dangerous_patterns = ['..', '/etc', '/proc', '/sys', '/dev']
     path_lower = path.lower()
     
@@ -62,12 +79,61 @@ def validate_store_path(path: str) -> bool:
         if pattern in path_lower:
             return False
     
-    # Ensure it doesn't start with / to prevent absolute path access
-    # (unless explicitly in current directory structure)
     if path.startswith('/') and not path.startswith('./'):
         return False
     
     return True
+
+def get_aes_mode(cipher_mode: str):
+    """
+    Convert cipher mode string to AES mode constant.
+    
+    Only secure cipher modes are supported:
+    - GCM: Galois/Counter Mode (authenticated encryption, recommended)
+    - CBC: Cipher Block Chaining (legacy support only)
+    
+    Args:
+        cipher_mode: String representation of cipher mode ('GCM' or 'CBC')
+        
+    Returns:
+        AES mode constant (AES.MODE_GCM or AES.MODE_CBC)
+        
+    Raises:
+        ValueError: If cipher_mode is not supported
+    """
+    mode_map = {
+        'GCM': AES.MODE_GCM,
+        'CBC': AES.MODE_CBC,
+    }
+    
+    cipher_mode_upper = cipher_mode.upper()
+    if cipher_mode_upper not in mode_map:
+        raise ValueError(f'Unsupported cipher mode: {cipher_mode}. Only GCM and CBC are supported.')
+    
+    return mode_map[cipher_mode_upper]
+
+def migrate_legacy_datastore(datastore: dict) -> bool:
+    """
+    Migrate legacy datastores by adding cryptographic parameters.
+    
+    Detects legacy datastores (those without 'cipher' and 'cipher_mode' keys)
+    and adds them with the current legacy values (AES, CBC).
+    
+    Args:
+        datastore: The datastore dictionary to check and potentially migrate
+        
+    Returns:
+        True if the datastore was migrated (was legacy), False otherwise
+    """
+    was_legacy = False
+    
+    if 'cipher' not in datastore or 'cipher_mode' not in datastore:
+        was_legacy = True
+        datastore['cipher'] = LEGACY_CIPHER
+        datastore['cipher_mode'] = LEGACY_CIPHER_MODE
+        print('Legacy datastore detected. Added cryptographic parameters (cipher: AES, cipher_mode: CBC)')
+    
+    return was_legacy
 
 class InitialConfig():
     """
@@ -141,7 +207,6 @@ class InitialConfig():
         passphrase1 = self.pp1.get()
         passphrase2 = self.pp2.get()
         
-        # Only enable OK if both fields have content and match
         if passphrase1 and passphrase2 and passphrase1 == passphrase2:
             self.okbtn.config(state=tk.NORMAL)
             self.ppstat.config(text='')
@@ -154,14 +219,25 @@ class InitialConfig():
 
     def ok(self):
         """
-        Creates (if needed) the datastore and locks it with the given passphrase
+        Creates (if needed) the datastore and locks it with the given passphrase.
 
-        Encryption key is the SHA256 digest of passphrase, as bytes
+        The datastore is created with the default cryptographic parameters:
+        - Cipher: AES (as specified by DEFAULT_CIPHER)
+        - Mode: GCM by default (as specified by DEFAULT_CIPHER_MODE)
 
-        A challenge generated as the SHA256 digest of the ones complement of the passphrase.
-        The challenge is encrypted using AES-256 in CBC mode with a random 128-bit IV and the key.
+        Encryption key is the SHA256 digest of passphrase, as bytes.
 
-        Challenge = AES256(IV, Key, SHA256(CONCAT(i XOR 0xFF for i in passphrase)))
+        A challenge is generated as the SHA256 digest of the ones complement of the passphrase.
+        The challenge is encrypted using the cipher and mode specified in the datastore
+        (GCM mode uses authentication tags, CBC mode uses padding).
+
+        For GCM mode:
+        Challenge = AES256-GCM(IV, Key, SHA256(CONCAT(i XOR 0xFF for i in passphrase)))
+        Includes authentication tag for tamper detection.
+
+        For CBC mode:
+        Challenge = AES256-CBC(IV, Key, SHA256(CONCAT(i XOR 0xFF for i in passphrase)))
+        Uses PKCS padding.
         """
         config_data = {}
         config_data['store'] = {}
@@ -173,10 +249,19 @@ class InitialConfig():
         self.challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
         initialization_vector = get_random_bytes(AES_BLOCK_SIZE)
         config_data['iv'] = b64encode(initialization_vector).decode('utf-8')
-        cipher = AES.new(self.key, AES.MODE_CBC, iv=initialization_vector)
-        config_data['challenge'] = b64encode(cipher.encrypt(pad(self.challenge, AES.block_size))).decode('utf-8')
+        config_data['cipher'] = DEFAULT_CIPHER
+        config_data['cipher_mode'] = DEFAULT_CIPHER_MODE
+        aes_mode = get_aes_mode(config_data['cipher_mode'])
         
-        # Create data directory if needed
+        if config_data['cipher_mode'] == 'GCM':
+            cipher = AES.new(self.key, aes_mode, nonce=initialization_vector)
+            ciphertext, tag = cipher.encrypt_and_digest(self.challenge)
+            config_data['challenge'] = b64encode(ciphertext).decode('utf-8')
+            config_data['tag'] = b64encode(tag).decode('utf-8')
+        else:
+            cipher = AES.new(self.key, aes_mode, iv=initialization_vector)
+            config_data['challenge'] = b64encode(cipher.encrypt(pad(self.challenge, AES.block_size))).decode('utf-8')
+        
         data_dir = os.path.dirname(self.store_path)
         if data_dir and not os.path.exists(data_dir):
             os.makedirs(data_dir)
@@ -368,14 +453,24 @@ def handlePw(master: tk.Tk, datastore: dict, key: bytes, guilist: ttk.Treeview, 
             datastore.pop(password_dialog.site, None)
             entry = {}
             entry_initialization_vector = get_random_bytes(AES_BLOCK_SIZE)
-            entry_cipher = AES.new(key, AES.MODE_CBC, iv=entry_initialization_vector)
+            cipher_mode = datastore['cipher_mode']
+            aes_mode = get_aes_mode(cipher_mode)
             entry['iv'] = b64encode(entry_initialization_vector).decode('utf-8')
             entry_data = {}
             entry_data['username'] = password_dialog.username
             entry_data['password'] = password_dialog.password
             entry_data_json = dumps(entry_data).encode('utf-8')
-            entry_data_encrypted = entry_cipher.encrypt(pad(entry_data_json, AES.block_size))
-            entry['data'] = b64encode(entry_data_encrypted).decode('utf-8')
+            
+            if cipher_mode == 'GCM':
+                entry_cipher = AES.new(key, aes_mode, nonce=entry_initialization_vector)
+                entry_data_encrypted, tag = entry_cipher.encrypt_and_digest(entry_data_json)
+                entry['data'] = b64encode(entry_data_encrypted).decode('utf-8')
+                entry['tag'] = b64encode(tag).decode('utf-8')
+            else:
+                entry_cipher = AES.new(key, aes_mode, iv=entry_initialization_vector)
+                entry_data_encrypted = entry_cipher.encrypt(pad(entry_data_json, AES.block_size))
+                entry['data'] = b64encode(entry_data_encrypted).decode('utf-8')
+            
             datastore['store'][password_dialog.site] = deepcopy(entry)
             guilist.insert('', tk.END, values=(deepcopy(password_dialog.site), deepcopy(password_dialog.username), deepcopy(password_dialog.password)))
     elif action == PW_DEL:
@@ -416,32 +511,79 @@ def copyToClipboard(master: tk.Tk, listbox: ttk.Treeview, val: int):
 def searchCallback(datastore: dict, encryption_key:bytes, guilist: ttk.Treeview, search_var: tk.StringVar):
     for child in guilist.get_children():
         guilist.delete(child)
+    cipher_mode = datastore['cipher_mode']
+    aes_mode = get_aes_mode(cipher_mode)
     for site_name in [x for x in datastore['store'].keys() if search_var.get().lower() in x.lower()]:
         entry = deepcopy(datastore['store'][site_name])
-        entry_cipher = AES.new(encryption_key, AES.MODE_CBC, iv=b64decode(entry['iv']))
-        entry_data = entry_cipher.decrypt(b64decode(entry['data']))
-        entry_data = unpad(entry_data, AES.block_size)
+        
+        if cipher_mode == 'GCM':
+            entry_cipher = AES.new(encryption_key, aes_mode, nonce=b64decode(entry['iv']))
+            if 'tag' not in entry:
+                continue
+            entry_data = entry_cipher.decrypt_and_verify(b64decode(entry['data']), b64decode(entry['tag']))
+        else:
+            entry_cipher = AES.new(encryption_key, aes_mode, iv=b64decode(entry['iv']))
+            entry_data = entry_cipher.decrypt(b64decode(entry['data']))
+            entry_data = unpad(entry_data, AES.block_size)
+        
         entry_data = loads(entry_data.decode('utf-8'))
         guilist.insert('', tk.END, values=(deepcopy(site_name), deepcopy(entry_data['username']), deepcopy(entry_data['password'])))
 
-def decryptEntry(entry: dict, encryption_key: bytes) -> dict:
-    """Decrypt a single password entry"""
-    entry_cipher = AES.new(encryption_key, AES.MODE_CBC, iv=b64decode(entry['iv']))
-    entry_data = entry_cipher.decrypt(b64decode(entry['data']))
-    entry_data = unpad(entry_data, AES.block_size)
+def decryptEntry(entry: dict, encryption_key: bytes, cipher_mode: str) -> dict:
+    """
+    Decrypt a single password entry.
+    
+    Supports multiple cipher modes:
+    - GCM mode: Requires authentication tag, uses decrypt_and_verify
+    - CBC and other modes: Uses standard decrypt with unpadding
+    
+    Args:
+        entry: Dictionary containing 'iv', 'data', and optionally 'tag' (for GCM)
+        encryption_key: The decryption key (SHA-256 digest of passphrase)
+        cipher_mode: The cipher mode string (e.g., 'GCM', 'CBC')
+        
+    Returns:
+        Decrypted entry data as dictionary with 'username' and 'password'
+        
+    Raises:
+        ValueError: If GCM mode is used without a tag, or if authentication fails
+    """
+    aes_mode = get_aes_mode(cipher_mode)
+    
+    if cipher_mode == 'GCM':
+        if 'tag' not in entry:
+            raise ValueError('GCM mode requires authentication tag')
+        entry_cipher = AES.new(encryption_key, aes_mode, nonce=b64decode(entry['iv']))
+        entry_data = entry_cipher.decrypt_and_verify(b64decode(entry['data']), b64decode(entry['tag']))
+    else:
+        entry_cipher = AES.new(encryption_key, aes_mode, iv=b64decode(entry['iv']))
+        entry_data = entry_cipher.decrypt(b64decode(entry['data']))
+        entry_data = unpad(entry_data, AES.block_size)
+    
     entry_data = loads(entry_data.decode('utf-8'))
     return entry_data
 
 def displayTerminal(datastore: dict, encryption_key: bytes, search_term: str = None):
-    """Display passwords in terminal mode"""
+    """
+    Display passwords in terminal mode.
+    
+    Decrypts all entries using the datastore's specified cipher mode
+    (supports GCM with authentication tags and CBC with padding).
+    
+    Args:
+        datastore: The datastore dictionary containing entries and cipher_mode
+        encryption_key: The decryption key (SHA-256 digest of passphrase)
+        search_term: Optional search term to filter entries by site name
+    """
     print("\n" + "="*80)
     print(" PASSWORD MANAGER - DATASTORE ENTRIES")
     print("="*80)
     
     entries = []
+    cipher_mode = datastore['cipher_mode']
     for site_name in sorted(datastore['store'].keys()):
         if search_term is None or search_term.lower() in site_name.lower():
-            entry_data = decryptEntry(datastore['store'][site_name], encryption_key)
+            entry_data = decryptEntry(datastore['store'][site_name], encryption_key, cipher_mode)
             entries.append({
                 'site': site_name,
                 'username': entry_data['username'],
@@ -455,21 +597,17 @@ def displayTerminal(datastore: dict, encryption_key: bytes, search_term: str = N
             print("\nNo entries found in datastore")
         return
     
-    # Calculate column widths
     max_site = max(len(e['site']) for e in entries)
     max_user = max(len(e['username']) for e in entries)
     max_pass = max(len(e['password']) for e in entries)
     
-    # Set minimum column widths
     col_site = max(20, max_site + 2)
     col_user = max(20, max_user + 2)
     col_pass = max(20, max_pass + 2)
     
-    # Print header
     print(f"\n{'Site':<{col_site}} {'Username':<{col_user}} {'Password':<{col_pass}}")
     print("-" * (col_site + col_user + col_pass))
     
-    # Print entries
     for entry in entries:
         print(f"{entry['site']:<{col_site}} {entry['username']:<{col_user}} {entry['password']:<{col_pass}}")
     
@@ -477,34 +615,55 @@ def displayTerminal(datastore: dict, encryption_key: bytes, search_term: str = N
     print("="*80 + "\n")
 
 def terminalMode(store_path: str, search_term: str = None):
-    """Run password manager in terminal mode"""
-    # Check if datastore exists
+    """
+    Run password manager in terminal mode.
+    
+    Loads and unlocks a datastore, then displays entries. Supports both
+    GCM and CBC cipher modes. Legacy datastores are automatically migrated
+    to include cryptographic parameters.
+    
+    Args:
+        store_path: Path to the datastore file
+        search_term: Optional search term to filter displayed entries
+    """
     if not os.path.exists(store_path):
         sys.stderr.write(f"ERROR: Datastore not found at {store_path}\n")
         sys.exit(1)
     
-    # Get passphrase from user
     try:
         passphrase = getpass.getpass("Enter passphrase: ")
     except (EOFError, KeyboardInterrupt):
         sys.exit(0)
     
-    # Generate key and challenge
     encryption_key = SHA256.new(data=passphrase.encode('utf-8')).digest()
     challenge_string = ''
     for char in passphrase:
         challenge_string += chr(ord(char) ^ 0xff)
     expected_challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
     
-    # Load and verify datastore
     try:
         with open(store_path, 'r') as store_file:
             datastore = loads(store_file.read())
+        
+        was_migrated = migrate_legacy_datastore(datastore)
+        if was_migrated:
+            saveDatastore(datastore, store_path)
+        
         initialization_vector = b64decode(datastore['iv'])
-        cipher = AES.new(encryption_key, AES.MODE_CBC, iv=initialization_vector)
+        cipher_mode = datastore['cipher_mode']
+        aes_mode = get_aes_mode(cipher_mode)
         challenge_encrypted = b64decode(datastore['challenge'])
-        challenge_decrypted = cipher.decrypt(challenge_encrypted)
-        challenge_decrypted = unpad(challenge_decrypted, AES.block_size)
+        
+        if cipher_mode == 'GCM':
+            cipher = AES.new(encryption_key, aes_mode, nonce=initialization_vector)
+            if 'tag' not in datastore:
+                raise ValueError('GCM mode requires authentication tag')
+            challenge_decrypted = cipher.decrypt_and_verify(challenge_encrypted, b64decode(datastore['tag']))
+        else:
+            cipher = AES.new(encryption_key, aes_mode, iv=initialization_vector)
+            challenge_decrypted = cipher.decrypt(challenge_encrypted)
+            challenge_decrypted = unpad(challenge_decrypted, AES.block_size)
+        
         assert expected_challenge == challenge_decrypted, 'Challenge mismatch'
     except ValueError:
         sys.stderr.write('ERROR: Incorrect passphrase\n')
@@ -515,7 +674,6 @@ def terminalMode(store_path: str, search_term: str = None):
     
     print('Datastore unlocked successfully!')
     
-    # Display entries
     displayTerminal(datastore, encryption_key, search_term)
 
 def parseArgs():
@@ -539,9 +697,8 @@ Examples:
     parser.add_argument('--search', type=str,
                        help='Search for entries containing this term (terminal mode only)')
     
-    args = parser.parse_args()
+    args = parser.parse_args(    )
     
-    # Validate store path
     if not validate_store_path(args.store):
         sys.stderr.write(f"ERROR: Invalid or unsafe store path: {args.store}\n")
         sys.exit(1)
@@ -551,10 +708,8 @@ Examples:
 def main():
     'Main entry point'
     
-    # Parse command line arguments
     args = parseArgs()
     
-    # Handle terminal mode
     if args.no_gui:
         terminalMode(args.store, args.search)
         return
@@ -563,15 +718,12 @@ def main():
     root.title('Simple password manager')
     root.minsize(width=800, height=600)
     
-    # Set theme (clam is modern and clean)
     style = ttk.Style()
     style.theme_use('clam')
     
-    # Check data directory and/or unlock datastore
     key = None
     uchall = None
     
-    # Determine store path and data directory
     store_path = args.store
     data_dir = os.path.dirname(store_path) if os.path.dirname(store_path) else './data'
     
@@ -593,12 +745,36 @@ def main():
         sys.exit()
     with open(store_path, 'r') as f:
         datastore = loads(f.read())
+    
+    was_migrated = migrate_legacy_datastore(datastore)
+    if was_migrated:
+        saveDatastore(datastore, store_path)
+    
     iv = b64decode(datastore['iv'])
-    lcipher = AES.new(key, AES.MODE_CBC, iv=iv)
+    cipher_mode = datastore['cipher_mode']
+    aes_mode = get_aes_mode(cipher_mode)
     challenge = b64decode(datastore['challenge'])
-    challenge = lcipher.decrypt(challenge)
+    
+    if cipher_mode == 'GCM':
+        lcipher = AES.new(key, aes_mode, nonce=iv)
+        if 'tag' not in datastore:
+            sys.stderr.write('ERROR: GCM mode requires authentication tag\r\n')
+            sys.exit()
+        try:
+            challenge = lcipher.decrypt_and_verify(challenge, b64decode(datastore['tag']))
+        except ValueError as e:
+            sys.stderr.write(f'ERROR: Authentication failed - {str(e)}\r\n')
+            sys.exit()
+    else:
+        lcipher = AES.new(key, aes_mode, iv=iv)
+        challenge = lcipher.decrypt(challenge)
+        try:
+            challenge = unpad(challenge, AES.block_size)
+        except ValueError:
+            sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+            sys.exit()
+    
     try:
-        challenge = unpad(challenge, AES.block_size)
         assert uchall == challenge, 'Challenge mismatch'
     except ValueError:
         sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
@@ -613,7 +789,7 @@ def main():
     root.attributes('-topmost', True)
     root.attributes('-topmost', False)
     root.protocol('WM_DELETE_WINDOW', lambda: saveAndExit(datastore, store_path))
-    # Menus
+    
     menu = tk.Menu(master=root)
     root.config(menu=menu)
     
@@ -627,17 +803,15 @@ def main():
     
     def change_theme(theme_name):
         style.theme_use(theme_name)
-        # Update theme indicator
         for i in range(viewmenu.index(tk.END) + 1):
             viewmenu.entryconfig(i, state='normal')
         print(f'Themed changed to: {theme_name}')
     
-    # Theme options
     available_themes = ['clam', 'alt', 'default', 'classic']
     for theme in available_themes:
         viewmenu.add_command(label=f"Theme: {theme}", 
                            command=lambda t=theme: change_theme(t))
-    # Toolbar
+    
     toolbar = tk.Frame(root)
     addbtn = ttk.Button(toolbar, text='Add', width=6)
     addbtn.pack(side=tk.LEFT, padx=2, pady=2)
@@ -655,7 +829,7 @@ def main():
     cpbtn = ttk.Button(toolbar, text='Copy password', width=12)
     cpbtn.pack(side=tk.RIGHT, padx=2, pady=2)
     toolbar.pack(side=tk.TOP, fill=tk.X)
-    # List box
+    
     listframe = tk.Frame(master=root)
     listsb = tk.Scrollbar(master=listframe, orient=tk.VERTICAL)
     listbox = ttk.Treeview(master=listframe, columns=['site', 'username', 'password'], show='headings', selectmode='browse')
@@ -663,25 +837,34 @@ def main():
     listbox.heading('username', text='Username')
     listbox.heading('password', text='Password')
     listsb.config(command=listbox.yview)
+    cipher_mode = datastore['cipher_mode']
+    aes_mode = get_aes_mode(cipher_mode)
     for k in datastore['store'].keys():
         entry = deepcopy(datastore['store'][k])
-        entry_cipher = AES.new(key, AES.MODE_CBC, iv=b64decode(entry['iv']))
-        entry_data = entry_cipher.decrypt(b64decode(entry['data']))
-        entry_data = unpad(entry_data, AES.block_size)
+        
+        if cipher_mode == 'GCM':
+            entry_cipher = AES.new(key, aes_mode, nonce=b64decode(entry['iv']))
+            if 'tag' not in entry:
+                continue
+            entry_data = entry_cipher.decrypt_and_verify(b64decode(entry['data']), b64decode(entry['tag']))
+        else:
+            entry_cipher = AES.new(key, aes_mode, iv=b64decode(entry['iv']))
+            entry_data = entry_cipher.decrypt(b64decode(entry['data']))
+            entry_data = unpad(entry_data, AES.block_size)
+        
         entry_data = loads(entry_data.decode('utf-8'))
         listbox.insert('', tk.END, values=(deepcopy(k), deepcopy(entry_data['username']), deepcopy(entry_data['password'])))
-    #     listbox.insert('', 'end', k['values'])
-    # listbox.insert('', tk.END, values=('test', 'test', 'test'))
+    
     listsb.pack(side=tk.RIGHT, fill=tk.Y)
     listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
     listframe.pack(fill=tk.BOTH, expand=1, padx=4, pady=4)
-    # Button configs
+    
     addbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_ADD))
     delbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_DEL))
     edtbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_EDT))
     cubtn.config(command=lambda: copyToClipboard(root, listbox, CB_USER))
     cpbtn.config(command=lambda: copyToClipboard(root, listbox, CB_PASS))
-    # Search entry callback
+    
     schvar.trace('w', lambda unused_var, unused_idx, unused_mode, ds=datastore, encryption_key=key, lst=listbox, search_var=schvar: searchCallback(ds, encryption_key, lst, search_var))
     root.mainloop()
     saveDatastore(datastore, store_path)
