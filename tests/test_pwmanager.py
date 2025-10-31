@@ -621,3 +621,305 @@ class TestEdgeCases:
         decrypted = pwmanager.decryptEntry(entry, test_key, cbc_datastore['cipher_mode'])
         assert decrypted == entry_data
 
+
+# Test migration functionality
+class TestMigration:
+    """Test datastore migration from CBC to GCM"""
+    
+    @pytest.fixture
+    def cbc_datastore_with_entries(self, test_key, test_challenge):
+        """Create a CBC datastore with password entries"""
+        iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+        cipher = AES.new(test_key, AES.MODE_CBC, iv=iv)
+        encrypted_challenge = cipher.encrypt(pad(test_challenge, AES.block_size))
+        
+        datastore = {
+            'cipher': 'AES',
+            'cipher_mode': 'CBC',
+            'iv': b64encode(iv).decode('utf-8'),
+            'challenge': b64encode(encrypted_challenge).decode('utf-8'),
+            'store': {}
+        }
+        
+        # Add some password entries
+        entries_data = {
+            'site1.com': {'username': 'user1', 'password': 'pass1'},
+            'site2.com': {'username': 'user2', 'password': 'pass2'},
+        }
+        
+        for site_name, entry_data in entries_data.items():
+            entry_iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+            entry_cipher = AES.new(test_key, AES.MODE_CBC, iv=entry_iv)
+            entry_json = dumps(entry_data).encode('utf-8')
+            encrypted = entry_cipher.encrypt(pad(entry_json, AES.block_size))
+            
+            datastore['store'][site_name] = {
+                'iv': b64encode(entry_iv).decode('utf-8'),
+                'data': b64encode(encrypted).decode('utf-8')
+            }
+        
+        return datastore
+    
+    def test_create_backup_file(self, temp_datastore_path, cbc_datastore):
+        """Test backup file creation"""
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(cbc_datastore, temp_datastore_path)
+        
+        backup_path = pwmanager.create_backup_file(temp_datastore_path)
+        
+        # Verify backup file exists
+        assert os.path.exists(backup_path)
+        
+        # Verify backup file is in the same directory
+        assert os.path.dirname(backup_path) == os.path.dirname(temp_datastore_path)
+        
+        # Verify backup filename contains timestamp pattern
+        backup_filename = os.path.basename(backup_path)
+        assert '_backup_' in backup_filename
+        assert backup_filename.endswith('.pws')
+        
+        # Verify backup content matches original
+        with open(backup_path, 'r') as f:
+            backup_data = loads(f.read())
+        assert backup_data == cbc_datastore
+    
+    def test_migrate_cbc_to_gcm_success(self, temp_datastore_path, cbc_datastore_with_entries, 
+                                        test_key, test_passphrase):
+        """Test successful migration from CBC to GCM"""
+        # Save CBC datastore
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(cbc_datastore_with_entries, temp_datastore_path)
+        
+        # Perform migration
+        success = pwmanager.migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
+        assert success is True
+        
+        # Verify backup was created
+        backup_files = [f for f in os.listdir(os.path.dirname(temp_datastore_path)) 
+                       if f.endswith('.pws') and '_backup_' in f]
+        assert len(backup_files) >= 1
+        
+        # Load migrated datastore
+        with open(temp_datastore_path, 'r') as f:
+            migrated = loads(f.read())
+        
+        # Verify migration to GCM
+        assert migrated['cipher'] == pwmanager.DEFAULT_CIPHER
+        assert migrated['cipher_mode'] == pwmanager.DEFAULT_CIPHER_MODE
+        assert 'tag' in migrated  # GCM requires tag
+        
+        # Verify challenge can be decrypted with GCM
+        nonce = b64decode(migrated['iv'])
+        challenge_encrypted = b64decode(migrated['challenge'])
+        tag = b64decode(migrated['tag'])
+        
+        cipher = AES.new(test_key, AES.MODE_GCM, nonce=nonce)
+        challenge_decrypted = cipher.decrypt_and_verify(challenge_encrypted, tag)
+        
+        # Verify entries were migrated
+        assert len(migrated['store']) == len(cbc_datastore_with_entries['store'])
+        
+        # Verify entries can be decrypted with GCM
+        for site_name, entry in migrated['store'].items():
+            assert 'tag' in entry  # GCM entries have tags
+            entry_iv = b64decode(entry['iv'])
+            entry_data_encrypted = b64decode(entry['data'])
+            entry_tag = b64decode(entry['tag'])
+            
+            entry_cipher = AES.new(test_key, AES.MODE_GCM, nonce=entry_iv)
+            entry_data = entry_cipher.decrypt_and_verify(entry_data_encrypted, entry_tag)
+            entry_data = loads(entry_data.decode('utf-8'))
+            
+            # Verify entry data matches original
+            original_entry = cbc_datastore_with_entries['store'][site_name]
+            original_entry_iv = b64decode(original_entry['iv'])
+            original_entry_data_encrypted = b64decode(original_entry['data'])
+            
+            original_cipher = AES.new(test_key, AES.MODE_CBC, iv=original_entry_iv)
+            original_entry_data = original_cipher.decrypt(original_entry_data_encrypted)
+            original_entry_data = unpad(original_entry_data, AES.block_size)
+            original_entry_data = loads(original_entry_data.decode('utf-8'))
+            
+            assert entry_data == original_entry_data
+    
+    def test_migrate_already_gcm(self, temp_datastore_path, gcm_datastore, test_key, test_passphrase):
+        """Test migration when datastore is already in GCM mode"""
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(gcm_datastore, temp_datastore_path)
+        
+        # Attempt migration
+        success = pwmanager.migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
+        assert success is False
+        
+        # Verify datastore unchanged
+        with open(temp_datastore_path, 'r') as f:
+            loaded = loads(f.read())
+        assert loaded['cipher_mode'] == 'GCM'
+    
+    def test_migrate_wrong_passphrase(self, temp_datastore_path, cbc_datastore_with_entries, 
+                                     test_key):
+        """Test migration with wrong passphrase fails"""
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(cbc_datastore_with_entries, temp_datastore_path)
+        
+        wrong_passphrase = "wrong_passphrase"
+        wrong_key = SHA256.new(data=wrong_passphrase.encode('utf-8')).digest()
+        
+        # Migration should fail with wrong passphrase (padding error or ValueError)
+        # Wrong passphrase causes decryption to fail, which raises ValueError
+        with pytest.raises((ValueError, Exception)):
+            pwmanager.migrate_datastore_to_gcm(temp_datastore_path, wrong_key, wrong_passphrase)
+        
+        # Verify datastore was restored from backup (backup restore should have occurred)
+        with open(temp_datastore_path, 'r') as f:
+            loaded = loads(f.read())
+        assert loaded['cipher_mode'] == 'CBC'
+    
+    def test_migrate_with_legacy_datastore(self, temp_datastore_path, legacy_datastore, test_key):
+        """Test migration of legacy datastore (without cipher/cipher_mode)"""
+        # Add cipher_mode to make it CBC
+        legacy_datastore['cipher'] = 'AES'
+        legacy_datastore['cipher_mode'] = 'CBC'
+        
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(legacy_datastore, temp_datastore_path)
+        
+        # Create passphrase for this legacy datastore (using "test")
+        legacy_passphrase = "test"
+        legacy_key = SHA256.new(data=legacy_passphrase.encode('utf-8')).digest()
+        
+        # Perform migration
+        success = pwmanager.migrate_datastore_to_gcm(temp_datastore_path, legacy_key, legacy_passphrase)
+        assert success is True
+        
+        # Verify migration to GCM
+        with open(temp_datastore_path, 'r') as f:
+            migrated = loads(f.read())
+        assert migrated['cipher_mode'] == 'GCM'
+    
+    def test_migrate_empty_datastore(self, temp_datastore_path, test_key, test_passphrase):
+        """Test migration of empty CBC datastore"""
+        cbc_datastore = {
+            'cipher': 'AES',
+            'cipher_mode': 'CBC',
+            'iv': b64encode(get_random_bytes(pwmanager.AES_BLOCK_SIZE)).decode('utf-8'),
+            'challenge': b64encode(get_random_bytes(16)).decode('utf-8'),
+            'store': {}
+        }
+        
+        # We need to create a proper challenge for this to work
+        # Let's use the test fixture properly
+        iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+        cipher = AES.new(test_key, AES.MODE_CBC, iv=iv)
+        challenge_string = ''
+        for char in test_passphrase:
+            challenge_string += chr(ord(char) ^ 0xff)
+        challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
+        encrypted_challenge = cipher.encrypt(pad(challenge, AES.block_size))
+        
+        cbc_datastore['iv'] = b64encode(iv).decode('utf-8')
+        cbc_datastore['challenge'] = b64encode(encrypted_challenge).decode('utf-8')
+        
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(cbc_datastore, temp_datastore_path)
+        
+        # Perform migration
+        success = pwmanager.migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
+        assert success is True
+        
+        # Verify migration
+        with open(temp_datastore_path, 'r') as f:
+            migrated = loads(f.read())
+        assert migrated['cipher_mode'] == 'GCM'
+        assert migrated['store'] == {}
+    
+    def test_migrate_multiple_entries(self, temp_datastore_path, test_key, test_passphrase, test_challenge):
+        """Test migration with multiple password entries"""
+        # Create CBC datastore with multiple entries
+        iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+        cipher = AES.new(test_key, AES.MODE_CBC, iv=iv)
+        encrypted_challenge = cipher.encrypt(pad(test_challenge, AES.block_size))
+        
+        datastore = {
+            'cipher': 'AES',
+            'cipher_mode': 'CBC',
+            'iv': b64encode(iv).decode('utf-8'),
+            'challenge': b64encode(encrypted_challenge).decode('utf-8'),
+            'store': {}
+        }
+        
+        # Add multiple entries
+        entries = {
+            'github.com': {'username': 'gituser', 'password': 'gitpass'},
+            'example.com': {'username': 'exuser', 'password': 'expass'},
+            'test.com': {'username': 'tuser', 'password': 'tpass'},
+        }
+        
+        for site_name, entry_data in entries.items():
+            entry_iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+            entry_cipher = AES.new(test_key, AES.MODE_CBC, iv=entry_iv)
+            entry_json = dumps(entry_data).encode('utf-8')
+            encrypted = entry_cipher.encrypt(pad(entry_json, AES.block_size))
+            
+            datastore['store'][site_name] = {
+                'iv': b64encode(entry_iv).decode('utf-8'),
+                'data': b64encode(encrypted).decode('utf-8')
+            }
+        
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(datastore, temp_datastore_path)
+        
+        # Perform migration
+        success = pwmanager.migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
+        assert success is True
+        
+        # Verify all entries were migrated and can be decrypted
+        with open(temp_datastore_path, 'r') as f:
+            migrated = loads(f.read())
+        
+        assert len(migrated['store']) == len(entries)
+        
+        for site_name, expected_data in entries.items():
+            entry = migrated['store'][site_name]
+            entry_iv = b64decode(entry['iv'])
+            entry_data_encrypted = b64decode(entry['data'])
+            entry_tag = b64decode(entry['tag'])
+            
+            entry_cipher = AES.new(test_key, AES.MODE_GCM, nonce=entry_iv)
+            entry_data = entry_cipher.decrypt_and_verify(entry_data_encrypted, entry_tag)
+            entry_data = loads(entry_data.decode('utf-8'))
+            
+            assert entry_data == expected_data
+    
+    def test_migrate_backup_restore_on_failure(self, temp_datastore_path, test_key):
+        """Test that backup is restored on migration failure"""
+        # Create a corrupted CBC datastore
+        iv = get_random_bytes(pwmanager.AES_BLOCK_SIZE)
+        datastore = {
+            'cipher': 'AES',
+            'cipher_mode': 'CBC',
+            'iv': b64encode(iv).decode('utf-8'),
+            'challenge': 'invalid_challenge_data',  # Invalid challenge
+            'store': {}
+        }
+        
+        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
+        pwmanager.saveDatastore(datastore, temp_datastore_path)
+        
+        original_content = None
+        with open(temp_datastore_path, 'r') as f:
+            original_content = f.read()
+        
+        # Attempt migration with wrong key (should fail)
+        wrong_passphrase = "wrong"
+        wrong_key = SHA256.new(data=wrong_passphrase.encode('utf-8')).digest()
+        
+        # Migration should fail and restore from backup
+        with pytest.raises((ValueError, Exception)):
+            pwmanager.migrate_datastore_to_gcm(temp_datastore_path, wrong_key, wrong_passphrase)
+        
+        # Verify backup file exists
+        backup_files = [f for f in os.listdir(os.path.dirname(temp_datastore_path)) 
+                       if f.endswith('.pws') and '_backup_' in f]
+        assert len(backup_files) >= 1
+

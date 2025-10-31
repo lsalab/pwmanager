@@ -16,6 +16,8 @@ import os
 import sys
 import argparse
 import getpass
+import shutil
+from datetime import datetime
 import tkinter as tk
 import tkinter.ttk as ttk
 import tkinter.messagebox as mbox
@@ -134,6 +136,157 @@ def migrate_legacy_datastore(datastore: dict) -> bool:
         print('Legacy datastore detected. Added cryptographic parameters (cipher: AES, cipher_mode: CBC)')
     
     return was_legacy
+
+def create_backup_file(store_path: str) -> str:
+    """
+    Create a backup of the datastore file with a timestamp.
+    
+    Args:
+        store_path: Path to the datastore file to backup
+        
+    Returns:
+        Path to the created backup file
+        
+    Raises:
+        IOError: If the backup file cannot be created
+    """
+    if not os.path.exists(store_path):
+        raise IOError(f'Datastore file not found: {store_path}')
+    
+    # Create backup filename with timestamp
+    base_name = os.path.basename(store_path)
+    dir_name = os.path.dirname(store_path)
+    name_without_ext, ext = os.path.splitext(base_name)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_filename = f'{name_without_ext}_backup_{timestamp}{ext}'
+    
+    if dir_name:
+        backup_path = os.path.join(dir_name, backup_filename)
+    else:
+        backup_path = backup_filename
+    
+    # Copy the file
+    shutil.copy2(store_path, backup_path)
+    print(f'Backup created: {backup_path}')
+    
+    return backup_path
+
+def migrate_datastore_to_gcm(store_path: str, encryption_key: bytes, passphrase: str = None) -> bool:
+    """
+    Migrate a CBC (legacy) datastore to GCM mode.
+    
+    This function:
+    1. Loads the datastore and verifies it uses CBC mode
+    2. Creates a backup of the original file
+    3. Decrypts all entries using CBC mode
+    4. Re-encrypts all entries and challenge using GCM mode
+    5. Updates the datastore metadata
+    6. Saves the migrated datastore
+    
+    Args:
+        store_path: Path to the datastore file to migrate
+        encryption_key: The encryption key (SHA-256 digest of passphrase)
+        passphrase: Optional passphrase for challenge verification (if None, uses existing challenge)
+        
+    Returns:
+        True if migration was successful, False if the datastore is already in GCM mode
+        
+    Raises:
+        ValueError: If the datastore is not in CBC mode or if decryption fails
+        IOError: If the file cannot be read or written
+    """
+    if not os.path.exists(store_path):
+        raise IOError(f'Datastore file not found: {store_path}')
+    
+    # Load the datastore
+    with open(store_path, 'r') as f:
+        datastore = loads(f.read())
+    
+    # Ensure legacy datastores have cipher/cipher_mode
+    migrate_legacy_datastore(datastore)
+    
+    # Check if already in GCM mode
+    current_mode = datastore.get('cipher_mode', LEGACY_CIPHER_MODE)
+    if current_mode == 'GCM':
+        print(f'Datastore at {store_path} is already in GCM mode. No migration needed.')
+        return False
+    
+    if current_mode != 'CBC':
+        raise ValueError(f'Unsupported cipher mode for migration: {current_mode}. Only CBC can be migrated to GCM.')
+    
+    print(f'Migrating datastore from CBC to GCM mode: {store_path}')
+    
+    # Create backup
+    backup_path = create_backup_file(store_path)
+    
+    try:
+        # Decrypt the challenge using CBC to verify the key is correct
+        old_iv = b64decode(datastore['iv'])
+        old_challenge_encrypted = b64decode(datastore['challenge'])
+        old_aes_mode = get_aes_mode('CBC')
+        old_cipher = AES.new(encryption_key, old_aes_mode, iv=old_iv)
+        old_challenge = old_cipher.decrypt(old_challenge_encrypted)
+        old_challenge = unpad(old_challenge, AES.block_size)
+        
+        # If passphrase is provided, verify it
+        if passphrase:
+            challenge_string = ''
+            for char in passphrase:
+                challenge_string += chr(ord(char) ^ 0xff)
+            expected_challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
+            if expected_challenge != old_challenge:
+                raise ValueError('Passphrase verification failed. Incorrect passphrase.')
+        
+        # Migrate challenge to GCM
+        new_iv = get_random_bytes(AES_BLOCK_SIZE)
+        new_aes_mode = get_aes_mode('GCM')
+        new_cipher = AES.new(encryption_key, new_aes_mode, nonce=new_iv)
+        new_challenge_ciphertext, new_challenge_tag = new_cipher.encrypt_and_digest(old_challenge)
+        
+        # Update challenge in datastore
+        datastore['iv'] = b64encode(new_iv).decode('utf-8')
+        datastore['challenge'] = b64encode(new_challenge_ciphertext).decode('utf-8')
+        datastore['tag'] = b64encode(new_challenge_tag).decode('utf-8')
+        
+        # Migrate all entries from CBC to GCM
+        migrated_entries = {}
+        for site_name, entry in datastore['store'].items():
+            # Decrypt entry using CBC
+            entry_iv = b64decode(entry['iv'])
+            entry_data_encrypted = b64decode(entry['data'])
+            entry_cipher_old = AES.new(encryption_key, old_aes_mode, iv=entry_iv)
+            entry_data_decrypted = entry_cipher_old.decrypt(entry_data_encrypted)
+            entry_data_decrypted = unpad(entry_data_decrypted, AES.block_size)
+            
+            # Re-encrypt entry using GCM
+            new_entry_iv = get_random_bytes(AES_BLOCK_SIZE)
+            entry_cipher_new = AES.new(encryption_key, new_aes_mode, nonce=new_entry_iv)
+            entry_data_reencrypted, entry_tag = entry_cipher_new.encrypt_and_digest(entry_data_decrypted)
+            
+            # Update entry
+            migrated_entries[site_name] = {
+                'iv': b64encode(new_entry_iv).decode('utf-8'),
+                'data': b64encode(entry_data_reencrypted).decode('utf-8'),
+                'tag': b64encode(entry_tag).decode('utf-8')
+            }
+        
+        # Update datastore with migrated entries and metadata
+        datastore['store'] = migrated_entries
+        datastore['cipher'] = DEFAULT_CIPHER
+        datastore['cipher_mode'] = DEFAULT_CIPHER_MODE
+        
+        # Save migrated datastore
+        saveDatastore(datastore, store_path)
+        print(f'Successfully migrated datastore to GCM mode. Backup saved at: {backup_path}')
+        
+        return True
+        
+    except Exception as e:
+        # If migration fails, restore from backup
+        print(f'Migration failed: {str(e)}')
+        print(f'Restoring from backup: {backup_path}')
+        shutil.copy2(backup_path, store_path)
+        raise
 
 class InitialConfig():
     """
@@ -325,6 +478,71 @@ class AskPassphrase():
             self.__challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
             self.top.grab_release()
             self.top.destroy()
+
+class MigrateDialog():
+    """
+    Dialog window used to migrate a CBC datastore to GCM mode.
+    """
+
+    def __init__(self, parent):
+        dialog_window = self.top = tk.Toplevel(parent)
+        dialog_window.resizable(width=False, height=False)
+        dialog_window.title('Migrate to GCM Mode')
+        
+        tk.Label(dialog_window, 
+                text="This datastore is using legacy CBC encryption.\n"
+                     "Migrate to GCM mode for enhanced security?\n\n"
+                     "A backup will be created automatically.",
+                justify=tk.LEFT).grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            padx=10,
+            pady=10
+        )
+        
+        tk.Label(dialog_window, text="Enter passphrase:").grid(
+            row=1,
+            column=0,
+            padx=2,
+            pady=2,
+            sticky=tk.W
+        )
+        passphrase_entry = self.pp = tk.Entry(dialog_window, width=32, show="*")
+        passphrase_entry.grid(row=1, column=1, padx=2, pady=2)
+        
+        self.status_label = tk.Label(dialog_window, text='', fg='red')
+        self.status_label.grid(row=2, column=0, columnspan=2, padx=2, pady=2)
+        
+        button_frame = tk.Frame(dialog_window)
+        button_frame.grid(row=3, column=0, columnspan=2, padx=2, pady=10)
+        
+        ok_button = tk.Button(button_frame, text="Migrate", command=self.ok, width=10)
+        ok_button.pack(side=tk.LEFT, padx=5)
+        
+        cancel_button = tk.Button(button_frame, text="Cancel", command=self.cancel, width=10)
+        cancel_button.pack(side=tk.LEFT, padx=5)
+        
+        self.passphrase = None
+        self.migrated = False
+        passphrase_entry.focus_set()
+        passphrase_entry.bind('<Return>', self.ok)
+        dialog_window.grab_set()
+        dialog_window.attributes('-topmost', True)
+        dialog_window.protocol('WM_DELETE_WINDOW', self.cancel)
+
+    def ok(self, event=None): # pylint: disable=unused-argument
+        if self.pp.get():
+            self.passphrase = self.pp.get()
+            self.top.grab_release()
+            self.top.destroy()
+        else:
+            self.status_label.config(text='Please enter passphrase', fg='red')
+
+    def cancel(self):
+        self.passphrase = None
+        self.top.grab_release()
+        self.top.destroy()
 
 class PWDiag(): # pylint: disable=too-many-instance-attributes
     """Password information dialog"""
@@ -676,6 +894,43 @@ def terminalMode(store_path: str, search_term: str = None):
     
     displayTerminal(datastore, encryption_key, search_term)
 
+def migrationMode(store_path: str):
+    """
+    Run password manager in migration mode.
+    
+    Migrates a CBC (legacy) datastore to GCM mode, creating a backup
+    of the original file. Requires the passphrase to decrypt and verify.
+    
+    Args:
+        store_path: Path to the datastore file to migrate
+    """
+    if not os.path.exists(store_path):
+        sys.stderr.write(f"ERROR: Datastore not found at {store_path}\n")
+        sys.exit(1)
+    
+    try:
+        passphrase = getpass.getpass("Enter passphrase: ")
+    except (EOFError, KeyboardInterrupt):
+        sys.exit(0)
+    
+    encryption_key = SHA256.new(data=passphrase.encode('utf-8')).digest()
+    
+    try:
+        success = migrate_datastore_to_gcm(store_path, encryption_key, passphrase)
+        if success:
+            print('Migration completed successfully!')
+        else:
+            print('Migration skipped (datastore already in GCM mode)')
+    except ValueError as e:
+        sys.stderr.write(f'ERROR: {str(e)}\n')
+        sys.exit(1)
+    except IOError as e:
+        sys.stderr.write(f'ERROR: {str(e)}\n')
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f'ERROR: Migration failed - {str(e)}\n')
+        sys.exit(1)
+
 def parseArgs():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
@@ -687,6 +942,7 @@ Examples:
   %(prog)s --no-gui           # Display passwords in terminal mode
   %(prog)s -s mystore.pws     # Use a different datastore file
   %(prog)s --no-gui --search github  # Search for entries containing "github"
+  %(prog)s --migrate          # Migrate CBC datastore to GCM mode
         '''
     )
     parser.add_argument('-s', '--store', 
@@ -696,6 +952,8 @@ Examples:
                        help='Run in terminal mode (no GUI)')
     parser.add_argument('--search', type=str,
                        help='Search for entries containing this term (terminal mode only)')
+    parser.add_argument('--migrate', action='store_true',
+                       help='Migrate CBC (legacy) datastore to GCM mode (creates backup)')
     
     args = parser.parse_args(    )
     
@@ -709,6 +967,10 @@ def main():
     'Main entry point'
     
     args = parseArgs()
+    
+    if args.migrate:
+        migrationMode(args.store)
+        return
     
     if args.no_gui:
         terminalMode(args.store, args.search)
@@ -824,6 +1086,13 @@ def main():
     schvar = tk.StringVar(master=toolbar)
     schety = ttk.Entry(master=toolbar, width=32, textvariable=schvar)
     schety.pack(side=tk.LEFT, padx=2)
+    
+    # Migration button - only show if datastore is in CBC mode
+    migratebtn = None
+    if cipher_mode == 'CBC':
+        migratebtn = ttk.Button(toolbar, text='Migrate to GCM', width=15)
+        migratebtn.pack(side=tk.LEFT, padx=2, pady=2)
+    
     cubtn = ttk.Button(toolbar, text='Copy username', width=12)
     cubtn.pack(side=tk.RIGHT, padx=2, pady=2)
     cpbtn = ttk.Button(toolbar, text='Copy password', width=12)
@@ -859,15 +1128,59 @@ def main():
     listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
     listframe.pack(fill=tk.BOTH, expand=1, padx=4, pady=4)
     
+    migration_successful = False  # Track if migration succeeded
+    
+    def handle_migration():
+        """Handle migration of datastore from CBC to GCM"""
+        nonlocal migration_successful, datastore
+        
+        migrate_dialog = MigrateDialog(root)
+        root.wait_window(migrate_dialog.top)
+        
+        if migrate_dialog.passphrase is None:
+            return  # User cancelled
+        
+        try:
+            migration_key = SHA256.new(data=migrate_dialog.passphrase.encode('utf-8')).digest()
+            
+            # Verify passphrase matches current key
+            if migration_key != key:
+                mbox.showerror('Migration Failed', 'Incorrect passphrase')
+                return
+            
+            # Perform migration
+            success = migrate_datastore_to_gcm(store_path, migration_key, migrate_dialog.passphrase)
+            
+            if success:
+                # Reload the datastore from disk to get the migrated GCM version
+                with open(store_path, 'r') as f:
+                    datastore = loads(f.read())
+                
+                migration_successful = True
+                mbox.showinfo('Migration Successful', 
+                            'Datastore migrated to GCM mode successfully!\n'
+                            'A backup has been created.\n\n'
+                            'Please restart the application to continue.')
+                root.quit()
+            else:
+                mbox.showinfo('Migration Skipped', 'Datastore is already in GCM mode')
+        except Exception as e:
+            mbox.showerror('Migration Failed', f'Migration failed: {str(e)}')
+    
     addbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_ADD))
     delbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_DEL))
     edtbtn.config(command=lambda: handlePw(root, datastore, key, listbox, PW_EDT))
     cubtn.config(command=lambda: copyToClipboard(root, listbox, CB_USER))
     cpbtn.config(command=lambda: copyToClipboard(root, listbox, CB_PASS))
     
+    if migratebtn is not None:
+        migratebtn.config(command=handle_migration)
+    
     schvar.trace('w', lambda unused_var, unused_idx, unused_mode, ds=datastore, encryption_key=key, lst=listbox, search_var=schvar: searchCallback(ds, encryption_key, lst, search_var))
     root.mainloop()
-    saveDatastore(datastore, store_path)
+    # Only save if migration didn't happen (migration already saves the datastore)
+    if not migration_successful:
+        saveDatastore(datastore, store_path)
 
 if __name__ == '__main__':
     main()
