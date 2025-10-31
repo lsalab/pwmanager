@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
-# pylint: disable=line-too-long,invalid-name
+# pylint: disable=line-too-long
 'Simple password manager'
 
 import os
 import sys
+import argparse
+import getpass
 import tkinter as tk
 import tkinter.ttk as ttk
 import tkinter.messagebox as mbox
 from json import dumps, loads
 from base64 import b64encode, b64decode
 from copy import deepcopy
-from Crypto.Hash import SHA256
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.Util.Padding import pad, unpad
+# Try importing from Crypto (pycryptodome standard package)
+# Fall back to Cryptodome (pycryptodomex or older installations)
+try:
+    from Crypto.Hash import SHA256
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+    from Crypto.Util.Padding import pad, unpad
+except (ImportError, ModuleNotFoundError):
+    try:
+        from Cryptodome.Hash import SHA256
+        from Cryptodome.Cipher import AES
+        from Cryptodome.Random import get_random_bytes
+        from Cryptodome.Util.Padding import pad, unpad
+    except ImportError as e:
+        sys.stderr.write(
+            "ERROR: Could not import cryptographic libraries.\n"
+            "Please install PyCryptodome or PyCryptodomex:\n"
+            "  pip install pycryptodome\n"
+            "  # or\n"
+            "  pip install pycryptodomex\n\n"
+        )
+        sys.exit(1)
 
 PW_ADD = 0
 PW_DEL = 1
@@ -21,55 +41,84 @@ PW_EDT = 2
 CB_USER = 0
 CB_PASS = 1
 
+# Constants
+AES_BLOCK_SIZE = 16
+AES_KEY_SIZE = 32
+PASSWORD_LENGTH = 24
+
+def validate_store_path(path: str) -> bool:
+    """
+    Validate that the store path is safe to use.
+    Prevents directory traversal and other path-based attacks.
+    """
+    if not path:
+        return False
+    
+    # Check for dangerous patterns
+    dangerous_patterns = ['..', '/etc', '/proc', '/sys', '/dev']
+    path_lower = path.lower()
+    
+    for pattern in dangerous_patterns:
+        if pattern in path_lower:
+            return False
+    
+    # Ensure it doesn't start with / to prevent absolute path access
+    # (unless explicitly in current directory structure)
+    if path.startswith('/') and not path.startswith('./'):
+        return False
+    
+    return True
+
 class InitialConfig():
     """
     Initial configuration dialog
     """
 
-    def __init__(self, parent):
-        top = self.top = tk.Toplevel(parent)
-        top.wm_resizable(width=False, height=False)
-        tk.Label(top, text='Datastore must be initialized and locked').grid(
+    def __init__(self, parent, store_path=None):
+        self.store_path = store_path if store_path else './data/store.pws'
+        dialog_window = self.top = tk.Toplevel(parent)
+        dialog_window.resizable(width=False, height=False)
+        tk.Label(dialog_window, text='Datastore must be initialized and locked').grid(
             row=0,
             column=0,
             columnspan=2,
             padx=2,
             pady=2
         )
-        tk.Label(top, text="Enter passphrase:").grid(
+        tk.Label(dialog_window, text="Enter passphrase:").grid(
             row=1,
             column=0,
             padx=2,
             sticky=tk.W
         )
-        pp1 = self.pp1 = tk.Entry(top, width=32, show="*")
-        pp1.grid(
+        passphrase_entry1 = self.pp1 = tk.Entry(dialog_window, width=32, show="*")
+        passphrase_entry1.grid(
             row=1,
             column=1,
             sticky=tk.E
         )
-        pp1.bind('<Key>', self.verify)
-        tk.Label(top, text="Re-enter passphrase:").grid(
+        passphrase_entry1.bind('<Key>', self.verify)
+        tk.Label(dialog_window, text="Re-enter passphrase:").grid(
             row=2,
             column=0,
             padx=2,
             sticky=tk.W
         )
-        pp2 = self.pp2 = tk.Entry(top, width=32, show="*")
-        pp2.grid(
+        passphrase_entry2 = self.pp2 = tk.Entry(dialog_window, width=32, show="*")
+        passphrase_entry2.grid(
             row=2,
             column=1,
             sticky=tk.E
         )
-        pp2.bind('<Key>', self.verify)
-        ppstat = self.ppstat = tk.Label(top, text='', fg='red')
-        ppstat.grid(
+        passphrase_entry2.bind('<Key>', self.verify)
+        status_label = self.ppstat = tk.Label(dialog_window, text='', fg='red')
+        status_label.grid(
             row=3,
             column=0,
             columnspan=2
         )
-        okbtn = self.okbtn = tk.Button(top, text="OK", command=self.ok, state=tk.DISABLED)
-        okbtn.grid(
+        ok_button = self.okbtn = tk.Button(dialog_window, text="OK", command=self.ok, state=tk.DISABLED)
+        ok_button.grid(
             row=4,
             column=0,
             columnspan=2,
@@ -78,27 +127,30 @@ class InitialConfig():
         )
         self.key = None
         self.challenge = None
-        top.grab_set()
-        top.wm_attributes('-topmost', True)
-        top.protocol('WM_DELETE_WINDOW', self.ok)
+        dialog_window.grab_set()
+        dialog_window.attributes('-topmost', True)
+        dialog_window.protocol('WM_DELETE_WINDOW', self.ok)
 
     def verify(self, event):
         """
-        Chacks whether both passphrases are the same
+        Checks whether both passphrases are the same
+        
+        Compares both fields after each keystroke to ensure they match.
+        Note: This checks mid-typing, so there may be momentary mismatch states.
         """
-        a = event.widget
-        if a == self.pp1:
-            b = self.pp2
-        else:
-            b = self.pp1
-        if len(a.get()) >= 0 and a.get() + event.char == b.get():
+        passphrase1 = self.pp1.get()
+        passphrase2 = self.pp2.get()
+        
+        # Only enable OK if both fields have content and match
+        if passphrase1 and passphrase2 and passphrase1 == passphrase2:
             self.okbtn.config(state=tk.NORMAL)
             self.ppstat.config(text='')
-            return True
         else:
             self.okbtn.config(state=tk.DISABLED)
-            self.ppstat.config(text='Passphrase does not match')
-            return False
+            if passphrase1 and passphrase2 and len(passphrase1) == len(passphrase2):
+                self.ppstat.config(text='Passphrase does not match')
+            else:
+                self.ppstat.config(text='')
 
     def ok(self):
         """
@@ -111,22 +163,26 @@ class InitialConfig():
 
         Challenge = AES256(IV, Key, SHA256(CONCAT(i XOR 0xFF for i in passphrase)))
         """
-        config = {}
-        config['store'] = {}
+        config_data = {}
+        config_data['store'] = {}
         passphrase = self.pp1.get()
         self.key = SHA256.new(data=passphrase.encode('utf-8')).digest()
-        challenge = ''
-        for c in passphrase:
-            challenge += chr(ord(c) ^ 0xff)
-        self.challenge = SHA256.new(data=challenge.encode('utf-8')).digest()
-        iv = get_random_bytes(16)
-        config['iv'] = b64encode(iv).decode('utf-8')
-        cipher = AES.new(self.key, AES.MODE_CBC, iv=iv)
-        config['challenge'] = b64encode(cipher.encrypt(pad(self.challenge, AES.block_size))).decode('utf-8')
-        if not os.path.exists('./data'):
-            os.mkdir('./data')
-        with open('./data/store.pws', 'w') as cfile:
-            cfile.write(dumps(config, indent=2))
+        challenge_string = ''
+        for char in passphrase:
+            challenge_string += chr(ord(char) ^ 0xff)
+        self.challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
+        initialization_vector = get_random_bytes(AES_BLOCK_SIZE)
+        config_data['iv'] = b64encode(initialization_vector).decode('utf-8')
+        cipher = AES.new(self.key, AES.MODE_CBC, iv=initialization_vector)
+        config_data['challenge'] = b64encode(cipher.encrypt(pad(self.challenge, AES.block_size))).decode('utf-8')
+        
+        # Create data directory if needed
+        data_dir = os.path.dirname(self.store_path)
+        if data_dir and not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        
+        with open(self.store_path, 'w') as config_file:
+            config_file.write(dumps(config_data, indent=2))
         self.top.grab_release()
         self.top.destroy()
 
@@ -136,25 +192,25 @@ class AskPassphrase():
     """
 
     def __init__(self, parent):
-        top = self.top = tk.Toplevel(parent)
-        top.wm_resizable(width=False, height=False)
-        tk.Label(top, text="Enter passphrase:").grid(
+        dialog_window = self.top = tk.Toplevel(parent)
+        dialog_window.resizable(width=False, height=False)
+        tk.Label(dialog_window, text="Enter passphrase:").grid(
             row=0,
             column=0,
             padx=2,
             pady=2
         )
-        pp = self.pp = tk.Entry(top, width=32, show="*")
-        pp.grid(row=1, column=0, padx=2, pady=2)
-        okbtn = self.okbtn = tk.Button(top, text="OK", command=self.ok)
-        okbtn.grid(row=4, column=0, columnspan=2, padx=2, pady=2)
+        passphrase_entry = self.pp = tk.Entry(dialog_window, width=32, show="*")
+        passphrase_entry.grid(row=1, column=0, padx=2, pady=2)
+        ok_button = self.okbtn = tk.Button(dialog_window, text="OK", command=self.ok)
+        ok_button.grid(row=4, column=0, columnspan=2, padx=2, pady=2)
         self.__key = b''
         self.__challenge = b''
-        pp.focus_set()
-        pp.bind('<Return>', self.ok)
-        top.grab_set()
-        top.wm_attributes('-topmost', True)
-        top.protocol('WM_DELETE_WINDOW', self.ok)
+        passphrase_entry.focus_set()
+        passphrase_entry.bind('<Return>', self.ok)
+        dialog_window.grab_set()
+        dialog_window.attributes('-topmost', True)
+        dialog_window.protocol('WM_DELETE_WINDOW', self.ok)
 
     @property
     def key(self) -> bytes:
@@ -176,11 +232,12 @@ class AskPassphrase():
 
     def ok(self, event=None): # pylint: disable=unused-argument
         if self.pp.get():
-            self.__key = SHA256.new(data=self.pp.get().encode('utf-8')).digest()
-            bufferstr = ''
-            for c in self.pp.get():
-                bufferstr += chr(ord(c) ^ 0xff)
-            self.__challenge = SHA256.new(data=bufferstr.encode('utf-8')).digest()
+            passphrase = self.pp.get()
+            self.__key = SHA256.new(data=passphrase.encode('utf-8')).digest()
+            challenge_string = ''
+            for char in passphrase:
+                challenge_string += chr(ord(char) ^ 0xff)
+            self.__challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
             self.top.grab_release()
             self.top.destroy()
 
@@ -227,7 +284,7 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         if 'password' in kwargs:
             self.__password.set(kwargs['password'])
         top.grab_set()
-        top.wm_attributes('-topmost', True)
+        top.attributes('-topmost', True)
         se.focus_set()
         top.protocol('WM_DELETE_WINDOW', self.__done)
 
@@ -277,7 +334,7 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
         self.top.destroy()
 
     def __generate(self):
-        self.password = b64encode(get_random_bytes(24)).decode('utf-8')
+        self.password = b64encode(get_random_bytes(PASSWORD_LENGTH)).decode('utf-8')
 
     def ok(self, event=None): # pylint: disable=unused-argument
         self.__okpressed = True
@@ -285,61 +342,61 @@ class PWDiag(): # pylint: disable=too-many-instance-attributes
 
 def handlePw(master: tk.Tk, datastore: dict, key: bytes, guilist: ttk.Treeview, action: int):
     if action in [PW_ADD, PW_EDT]:
-        pwd = None
+        password_dialog = None
         if action == PW_ADD:
-            pwd = PWDiag(master)
+            password_dialog = PWDiag(master)
         else:
             if guilist.focus() == '':
                 return
-            itemid = guilist.selection()[0]
-            sel_item = guilist.item(itemid)
-            sel_item = sel_item['values']
-            osite = sel_item[0]
-            ouser = sel_item[1]
-            opass = sel_item[2]
-            pwd = PWDiag(master, site=deepcopy(osite), username=deepcopy(ouser), password=deepcopy(opass))
-            pwd.se.config(state=tk.DISABLED)
-            pwd.ue.config(state=tk.DISABLED)
-            pwd.pe.focus_set()
-            guilist.delete(itemid)
-            del osite
-            del ouser
-            del opass
-            del sel_item
-        master.wait_window(pwd.top)
-        if pwd.okpressed and pwd.site.strip() != '':
-            datastore.pop(pwd.site, None)
+            selected_item_id = guilist.selection()[0]
+            selected_item = guilist.item(selected_item_id)
+            selected_values = selected_item['values']
+            old_site = selected_values[0]
+            old_username = selected_values[1]
+            old_password = selected_values[2]
+            password_dialog = PWDiag(master, site=deepcopy(old_site), username=deepcopy(old_username), password=deepcopy(old_password))
+            password_dialog.se.config(state=tk.DISABLED)
+            password_dialog.ue.config(state=tk.DISABLED)
+            password_dialog.pe.focus_set()
+            guilist.delete(selected_item_id)
+            del old_site
+            del old_username
+            del old_password
+            del selected_values
+        master.wait_window(password_dialog.top)
+        if password_dialog.okpressed and password_dialog.site.strip() != '':
+            datastore.pop(password_dialog.site, None)
             entry = {}
-            entry_iv = get_random_bytes(16)
-            entry_cipher = AES.new(key, AES.MODE_CBC, iv=entry_iv)
-            entry['iv'] = b64encode(entry_iv).decode('utf-8')
+            entry_initialization_vector = get_random_bytes(AES_BLOCK_SIZE)
+            entry_cipher = AES.new(key, AES.MODE_CBC, iv=entry_initialization_vector)
+            entry['iv'] = b64encode(entry_initialization_vector).decode('utf-8')
             entry_data = {}
-            entry_data['username'] = pwd.username
-            entry_data['password'] = pwd.password
-            entry_data = dumps(entry_data).encode('utf-8')
-            entry_data = entry_cipher.encrypt(pad(entry_data, AES.block_size))
-            entry['data'] = b64encode(entry_data).decode('utf-8')
-            datastore['store'][pwd.site] = deepcopy(entry)
-            guilist.insert('', tk.END, values=(deepcopy(pwd.site), deepcopy(pwd.username), deepcopy(pwd.password)))
+            entry_data['username'] = password_dialog.username
+            entry_data['password'] = password_dialog.password
+            entry_data_json = dumps(entry_data).encode('utf-8')
+            entry_data_encrypted = entry_cipher.encrypt(pad(entry_data_json, AES.block_size))
+            entry['data'] = b64encode(entry_data_encrypted).decode('utf-8')
+            datastore['store'][password_dialog.site] = deepcopy(entry)
+            guilist.insert('', tk.END, values=(deepcopy(password_dialog.site), deepcopy(password_dialog.username), deepcopy(password_dialog.password)))
     elif action == PW_DEL:
         if guilist.focus() == '':
             return
-        itemid = guilist.selection()[0]
-        site = guilist.item(itemid)['values'][0]
+        selected_item_id = guilist.selection()[0]
+        site_name = guilist.item(selected_item_id)['values'][0]
         if mbox.askyesno(title='Delete password', message='Are you sure you want to delete the selected password?\r\n(This cannot be undone)'):
-            datastore['store'].pop(site, None)
-            guilist.delete(itemid)
+            datastore['store'].pop(site_name, None)
+            guilist.delete(selected_item_id)
     else:
         print('ERROR: Unknown action')
 
-def saveDatastore(datastore: dict):
-    with open('./data/store.pws', 'w') as cfile:
-        cfile.write(dumps(datastore, indent=2))
-        cfile.flush()
+def saveDatastore(datastore: dict, store_path='./data/store.pws'):
+    with open(store_path, 'w') as store_file:
+        store_file.write(dumps(datastore, indent=2))
+        store_file.flush()
         print('Datastore saved!')
 
-def saveAndExit(datastore: dict):
-    saveDatastore(datastore)
+def saveAndExit(datastore: dict, store_path='./data/store.pws'):
+    saveDatastore(datastore, store_path)
     sys.exit(0)
 
 def copyToClipboard(master: tk.Tk, listbox: ttk.Treeview, val: int):
@@ -356,28 +413,170 @@ def copyToClipboard(master: tk.Tk, listbox: ttk.Treeview, val: int):
         print('Unknown header')
     master.update()
 
-def searchCallback(datastore: dict, key:bytes, guilist: ttk.Treeview, value: tk.StringVar):
-    for c in guilist.get_children():
-        guilist.delete(c)
-    for k in [x for x in datastore['store'].keys() if value.get().lower() in x.lower()]:
-        entry = deepcopy(datastore['store'][k])
-        entry_cipher = AES.new(key, AES.MODE_CBC, iv=b64decode(entry['iv']))
+def searchCallback(datastore: dict, encryption_key:bytes, guilist: ttk.Treeview, search_var: tk.StringVar):
+    for child in guilist.get_children():
+        guilist.delete(child)
+    for site_name in [x for x in datastore['store'].keys() if search_var.get().lower() in x.lower()]:
+        entry = deepcopy(datastore['store'][site_name])
+        entry_cipher = AES.new(encryption_key, AES.MODE_CBC, iv=b64decode(entry['iv']))
         entry_data = entry_cipher.decrypt(b64decode(entry['data']))
         entry_data = unpad(entry_data, AES.block_size)
         entry_data = loads(entry_data.decode('utf-8'))
-        guilist.insert('', tk.END, values=(deepcopy(k), deepcopy(entry_data['username']), deepcopy(entry_data['password'])))
+        guilist.insert('', tk.END, values=(deepcopy(site_name), deepcopy(entry_data['username']), deepcopy(entry_data['password'])))
+
+def decryptEntry(entry: dict, encryption_key: bytes) -> dict:
+    """Decrypt a single password entry"""
+    entry_cipher = AES.new(encryption_key, AES.MODE_CBC, iv=b64decode(entry['iv']))
+    entry_data = entry_cipher.decrypt(b64decode(entry['data']))
+    entry_data = unpad(entry_data, AES.block_size)
+    entry_data = loads(entry_data.decode('utf-8'))
+    return entry_data
+
+def displayTerminal(datastore: dict, encryption_key: bytes, search_term: str = None):
+    """Display passwords in terminal mode"""
+    print("\n" + "="*80)
+    print(" PASSWORD MANAGER - DATASTORE ENTRIES")
+    print("="*80)
+    
+    entries = []
+    for site_name in sorted(datastore['store'].keys()):
+        if search_term is None or search_term.lower() in site_name.lower():
+            entry_data = decryptEntry(datastore['store'][site_name], encryption_key)
+            entries.append({
+                'site': site_name,
+                'username': entry_data['username'],
+                'password': entry_data['password']
+            })
+    
+    if not entries:
+        if search_term:
+            print(f"\nNo entries found matching '{search_term}'")
+        else:
+            print("\nNo entries found in datastore")
+        return
+    
+    # Calculate column widths
+    max_site = max(len(e['site']) for e in entries)
+    max_user = max(len(e['username']) for e in entries)
+    max_pass = max(len(e['password']) for e in entries)
+    
+    # Set minimum column widths
+    col_site = max(20, max_site + 2)
+    col_user = max(20, max_user + 2)
+    col_pass = max(20, max_pass + 2)
+    
+    # Print header
+    print(f"\n{'Site':<{col_site}} {'Username':<{col_user}} {'Password':<{col_pass}}")
+    print("-" * (col_site + col_user + col_pass))
+    
+    # Print entries
+    for entry in entries:
+        print(f"{entry['site']:<{col_site}} {entry['username']:<{col_user}} {entry['password']:<{col_pass}}")
+    
+    print(f"\nTotal entries: {len(entries)}")
+    print("="*80 + "\n")
+
+def terminalMode(store_path: str, search_term: str = None):
+    """Run password manager in terminal mode"""
+    # Check if datastore exists
+    if not os.path.exists(store_path):
+        sys.stderr.write(f"ERROR: Datastore not found at {store_path}\n")
+        sys.exit(1)
+    
+    # Get passphrase from user
+    try:
+        passphrase = getpass.getpass("Enter passphrase: ")
+    except (EOFError, KeyboardInterrupt):
+        sys.exit(0)
+    
+    # Generate key and challenge
+    encryption_key = SHA256.new(data=passphrase.encode('utf-8')).digest()
+    challenge_string = ''
+    for char in passphrase:
+        challenge_string += chr(ord(char) ^ 0xff)
+    expected_challenge = SHA256.new(data=challenge_string.encode('utf-8')).digest()
+    
+    # Load and verify datastore
+    try:
+        with open(store_path, 'r') as store_file:
+            datastore = loads(store_file.read())
+        initialization_vector = b64decode(datastore['iv'])
+        cipher = AES.new(encryption_key, AES.MODE_CBC, iv=initialization_vector)
+        challenge_encrypted = b64decode(datastore['challenge'])
+        challenge_decrypted = cipher.decrypt(challenge_encrypted)
+        challenge_decrypted = unpad(challenge_decrypted, AES.block_size)
+        assert expected_challenge == challenge_decrypted, 'Challenge mismatch'
+    except ValueError:
+        sys.stderr.write('ERROR: Incorrect passphrase\n')
+        sys.exit(1)
+    except AssertionError as e:
+        sys.stderr.write(f'ERROR: Challenge verification failed - {str(e)}\n')
+        sys.exit(1)
+    
+    print('Datastore unlocked successfully!')
+    
+    # Display entries
+    displayTerminal(datastore, encryption_key, search_term)
+
+def parseArgs():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Simple password manager with GUI and terminal modes',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                    # Launch GUI with default datastore
+  %(prog)s --no-gui           # Display passwords in terminal mode
+  %(prog)s -s mystore.pws     # Use a different datastore file
+  %(prog)s --no-gui --search github  # Search for entries containing "github"
+        '''
+    )
+    parser.add_argument('-s', '--store', 
+                       default='./data/store.pws',
+                       help='Path to the password datastore (default: ./data/store.pws)')
+    parser.add_argument('--no-gui', action='store_true',
+                       help='Run in terminal mode (no GUI)')
+    parser.add_argument('--search', type=str,
+                       help='Search for entries containing this term (terminal mode only)')
+    
+    args = parser.parse_args()
+    
+    # Validate store path
+    if not validate_store_path(args.store):
+        sys.stderr.write(f"ERROR: Invalid or unsafe store path: {args.store}\n")
+        sys.exit(1)
+    
+    return args
 
 def main():
     'Main entry point'
-
+    
+    # Parse command line arguments
+    args = parseArgs()
+    
+    # Handle terminal mode
+    if args.no_gui:
+        terminalMode(args.store, args.search)
+        return
+    
     root = tk.Tk()
-    root.wm_title(string='Simple password manager')
-    root.wm_minsize(width=800, height=600)
+    root.title('Simple password manager')
+    root.minsize(width=800, height=600)
+    
+    # Set theme (clam is modern and clean)
+    style = ttk.Style()
+    style.theme_use('clam')
+    
     # Check data directory and/or unlock datastore
     key = None
     uchall = None
-    if not os.path.exists('./data') or not os.path.exists('./data/store.pws'):
-        initdiag = InitialConfig(root)
+    
+    # Determine store path and data directory
+    store_path = args.store
+    data_dir = os.path.dirname(store_path) if os.path.dirname(store_path) else './data'
+    
+    if not os.path.exists(data_dir) or not os.path.exists(store_path):
+        initdiag = InitialConfig(root, store_path)
         root.wait_window(initdiag.top)
         key = initdiag.key
         uchall = initdiag.challenge
@@ -392,7 +591,8 @@ def main():
     except AssertionError as e:
         sys.stderr.write(f'Key error: {str(e)}\r\nERROR: Unable to unlock datastore\r\n\r\n')
         sys.exit()
-    datastore = loads(open('./data/store.pws').read())
+    with open(store_path, 'r') as f:
+        datastore = loads(f.read())
     iv = b64decode(datastore['iv'])
     lcipher = AES.new(key, AES.MODE_CBC, iv=iv)
     challenge = b64decode(datastore['challenge'])
@@ -410,32 +610,49 @@ def main():
     challenge = None
     uchall = None
     print('Datastore unlocked')
-    root.wm_attributes('-topmost', True)
-    root.wm_attributes('-topmost', False)
-    root.protocol('WM_DELETE_WINDOW', lambda: saveAndExit(datastore))
+    root.attributes('-topmost', True)
+    root.attributes('-topmost', False)
+    root.protocol('WM_DELETE_WINDOW', lambda: saveAndExit(datastore, store_path))
     # Menus
     menu = tk.Menu(master=root)
     root.config(menu=menu)
+    
     filemenu = tk.Menu(master=menu, tearoff=0)
     menu.add_cascade(label='File', menu=filemenu)
-    filemenu.add_command(label='Save', command=lambda: saveDatastore(datastore))
-    filemenu.add_command(label='Exit', command=lambda: saveAndExit(datastore))
+    filemenu.add_command(label='Save', command=lambda: saveDatastore(datastore, store_path))
+    filemenu.add_command(label='Exit', command=lambda: saveAndExit(datastore, store_path))
+    
+    viewmenu = tk.Menu(master=menu, tearoff=0)
+    menu.add_cascade(label='View', menu=viewmenu)
+    
+    def change_theme(theme_name):
+        style.theme_use(theme_name)
+        # Update theme indicator
+        for i in range(viewmenu.index(tk.END) + 1):
+            viewmenu.entryconfig(i, state='normal')
+        print(f'Themed changed to: {theme_name}')
+    
+    # Theme options
+    available_themes = ['clam', 'alt', 'default', 'classic']
+    for theme in available_themes:
+        viewmenu.add_command(label=f"Theme: {theme}", 
+                           command=lambda t=theme: change_theme(t))
     # Toolbar
     toolbar = tk.Frame(root)
-    addbtn = tk.Button(toolbar, text='Add', width=6)
+    addbtn = ttk.Button(toolbar, text='Add', width=6)
     addbtn.pack(side=tk.LEFT, padx=2, pady=2)
-    delbtn = tk.Button(toolbar, text='Remove', width=6)
+    delbtn = ttk.Button(toolbar, text='Remove', width=6)
     delbtn.pack(side=tk.LEFT, padx=2, pady=2)
-    edtbtn = tk.Button(toolbar, text='Edit', width=6)
+    edtbtn = ttk.Button(toolbar, text='Edit', width=6)
     edtbtn.pack(side=tk.LEFT, padx=2, pady=2)
-    schlbl = tk.Label(toolbar, text='Search:', width=8)
+    schlbl = ttk.Label(toolbar, text='Search:', width=8)
     schlbl.pack(side=tk.LEFT, padx=2, pady=2)
     schvar = tk.StringVar(master=toolbar)
-    schety = tk.Entry(master=toolbar, width=32, textvariable=schvar)
+    schety = ttk.Entry(master=toolbar, width=32, textvariable=schvar)
     schety.pack(side=tk.LEFT, padx=2)
-    cubtn = tk.Button(toolbar, text='Copy username', width=12)
+    cubtn = ttk.Button(toolbar, text='Copy username', width=12)
     cubtn.pack(side=tk.RIGHT, padx=2, pady=2)
-    cpbtn = tk.Button(toolbar, text='Copy password', width=12)
+    cpbtn = ttk.Button(toolbar, text='Copy password', width=12)
     cpbtn.pack(side=tk.RIGHT, padx=2, pady=2)
     toolbar.pack(side=tk.TOP, fill=tk.X)
     # List box
@@ -465,9 +682,9 @@ def main():
     cubtn.config(command=lambda: copyToClipboard(root, listbox, CB_USER))
     cpbtn.config(command=lambda: copyToClipboard(root, listbox, CB_PASS))
     # Search entry callback
-    schvar.trace('w', lambda var, idx, mode, ds=datastore, k=key, lst=listbox, sv=schvar: searchCallback(ds, k, lst, sv))
+    schvar.trace('w', lambda unused_var, unused_idx, unused_mode, ds=datastore, encryption_key=key, lst=listbox, search_var=schvar: searchCallback(ds, encryption_key, lst, search_var))
     root.mainloop()
-    saveDatastore(datastore)
+    saveDatastore(datastore, store_path)
 
 if __name__ == '__main__':
     main()
