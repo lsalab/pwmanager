@@ -2,13 +2,11 @@
 
 This document describes how to run the test suite for the password manager.
 
-The password manager supports two secure cryptographic modes:
-- **GCM (Galois/Counter Mode)**: Default for new datastores, provides authenticated encryption
-- **CBC (Cipher Block Chaining)**: Legacy mode, supported for backward compatibility with existing datastores
+The password manager uses PBKDF2 for key derivation (100,000 iterations with unique salt) and AES-256-GCM for authenticated encryption.
 
-Insecure or unnecessary modes (ECB, CFB, OFB, CTR) have been removed to maintain security best practices.
+Insecure or unnecessary modes (ECB, CBC, CFB, OFB, CTR) have been removed to maintain security best practices. All datastores use GCM mode for authenticated encryption with tamper detection.
 
-The test suite comprehensively covers all cryptographic operations, legacy migration, and edge cases.
+The test suite comprehensively covers all cryptographic operations, datastore operations, and edge cases.
 
 ## Prerequisites
 
@@ -41,76 +39,84 @@ pytest -v
 Run specific test file:
 
 ```bash
+pytest tests/test_crypto.py
+pytest tests/test_datastore.py
 pytest tests/test_pwmanager.py
 ```
 
 Or from the root directory:
 
 ```bash
-python3 -m pytest tests/test_pwmanager.py
+python3 -m pytest tests/test_crypto.py
 ```
 
 Run specific test class:
 
 ```bash
-pytest tests/test_pwmanager.py::TestValidateStorePath
+pytest tests/test_crypto.py::TestGetAESMode
+pytest tests/test_datastore.py::TestValidateStorePath
 ```
 
 Run specific test:
 
 ```bash
-pytest tests/test_pwmanager.py::TestValidateStorePath::test_valid_paths
+pytest tests/test_crypto.py::TestGetAESMode::test_valid_modes
+pytest tests/test_datastore.py::TestValidateStorePath::test_valid_paths
 ```
 
 ## Test Coverage
 
 The test suite covers:
 
-1. **Helper Functions**
-   - `validate_store_path()` - Path validation tests
-   - `get_aes_mode()` - Cipher mode conversion tests
-   - `migrate_legacy_datastore()` - Legacy datastore migration tests
-
-2. **Cryptographic Operations**
-   - CBC mode encryption/decryption
+1. **Cryptographic Operations** (`test_crypto.py`)
+   - `get_aes_mode()` - Cipher mode conversion
+   - `derive_key()` - Key derivation from passphrase
+   - `derive_challenge()` - Challenge generation
+   - `generate_random_password()` - Random password generation
    - GCM mode encryption/decryption
    - Authentication tag handling for GCM
+   - Constants validation
 
-3. **Challenge Operations**
-   - Challenge generation
-   - Challenge verification (CBC and GCM)
-   - Wrong passphrase detection
+2. **Datastore Operations** (`test_datastore.py`)
+   - `validate_store_path()` - Path validation
+   - `load_datastore()` / `save_datastore()` - File operations
+   - `create_backup_file()` - Backup creation
+   - `verify_passphrase()` - Passphrase verification
+   - `initialize_datastore()` - New datastore creation
+   - `encrypt_entry()` / `decrypt_entry()` - Entry encryption/decryption
 
-4. **Datastore Operations**
-   - Creating new datastores
-   - Saving and loading datastores
-   - Legacy datastore migration
+3. **Integration Tests** (`test_pwmanager.py`)
+   - Path validation (integration)
+   - Application-level functionality
 
-5. **Password Entry Operations**
-   - Adding entries (CBC and GCM)
-   - Encrypting/decrypting entries
-   - Multiple entries handling
+## Prerequisites
 
-6. **Edge Cases**
-   - Empty passphrase
-   - Unicode passphrase
-   - Large entry data
-   - Special characters in entries
+- Python >= 3.8
+- pytest >= 7.0.0
+- pycryptodome >= 3.15.0
 
 ## Test Structure
 
-Tests are organized into classes by functionality:
+Tests are organized by module, matching the codebase structure:
 
-- `TestValidateStorePath` - Path validation
+### `tests/test_crypto.py` - Cryptographic Operations
 - `TestGetAESMode` - Cipher mode conversion
-- `TestMigrateLegacyDatastore` - Legacy migration
-- `TestCBCEncryptionDecryption` - CBC mode operations
+- `TestKeyDerivation` - Key and challenge derivation
+- `TestRandomPassword` - Random password generation
 - `TestGCMEncryptionDecryption` - GCM mode operations
-- `TestChallengeGeneration` - Challenge operations
-- `TestDatastoreOperations` - File operations
-- `TestPasswordEntryOperations` - Entry management
-- `TestConstants` - Constant validation
-- `TestEdgeCases` - Edge cases and error handling
+- `TestConstants` - Cryptographic constants
+
+### `tests/test_datastore.py` - Datastore Operations
+- `TestValidateStorePath` - Path validation
+- `TestDatastoreFileOperations` - File save/load/backup
+- `TestVerifyPassphrase` - Passphrase verification
+- `TestInitializeDatastore` - Datastore initialization
+- `TestEntryEncryptionDecryption` - Entry encryption/decryption
+
+### `tests/test_pwmanager.py` - Integration Tests
+- `TestValidateStorePath` - Path validation (integration)
+
+Shared fixtures are available in `tests/conftest.py`.
 
 ## Running with Coverage
 

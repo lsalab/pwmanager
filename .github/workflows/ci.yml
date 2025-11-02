@@ -1,17 +1,14 @@
 name: CI
 
 on:
-  push:
   pull_request:
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
     
     steps:
     - uses: actions/checkout@v4
@@ -52,8 +49,8 @@ jobs:
     
     - name: Run flake8
       run: |
-        flake8 pwmanager.py tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 pwmanager.py tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        flake8 pwmanager.py pwmanager/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 pwmanager.py pwmanager/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   codeql-analysis:
     name: CodeQL Analysis
