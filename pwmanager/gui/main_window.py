@@ -13,13 +13,10 @@ from json import loads
 from base64 import b64decode
 from copy import deepcopy
 
-from pwmanager.crypto import (
-    derive_key
-)
 from pwmanager.datastore import (
     load_datastore, save_datastore, migrate_legacy_datastore,
     decrypt_entry, encrypt_entry, migrate_datastore_to_gcm,
-    verify_passphrase
+    verify_passphrase, get_encryption_key_from_datastore
 )
 from pwmanager.gui.dialogs import (
     InitialConfig, AskPassphrase, MigrateDialog, PasswordDialog
@@ -123,43 +120,38 @@ def create_main_window(store_path: str):
     style = ttk.Style()
     style.theme_use('clam')
     
-    encryption_key = None
-    expected_challenge = None
-    
     data_dir = os.path.dirname(store_path) if os.path.dirname(store_path) else './data'
     
     # Initialize or unlock datastore
     if not os.path.exists(data_dir) or not os.path.exists(store_path):
         initial_config_dialog = InitialConfig(root, store_path)
         root.wait_window(initial_config_dialog.top)
-        encryption_key = initial_config_dialog.key
-        expected_challenge = initial_config_dialog.challenge
+        # Datastore is now initialized with PBKDF2, reload it
+        datastore = load_datastore(store_path)
+        passphrase = initial_config_dialog.passphrase_entry1.get()
+        encryption_key = get_encryption_key_from_datastore(datastore, passphrase)
     else:
-        passphrase_dialog = AskPassphrase(root)
-        root.wait_window(passphrase_dialog.top)
-        encryption_key = passphrase_dialog.key
-        expected_challenge = passphrase_dialog.challenge
+        ask_passphrase = AskPassphrase(root)
+        root.wait_window(ask_passphrase.top)
+        
+        if not ask_passphrase.passphrase:
+            sys.stderr.write('No passphrase provided\r\nERROR: Unable to unlock datastore\r\n\r\n')
+            sys.exit()
+        
+        datastore = load_datastore(store_path)
+        
+        was_migrated = migrate_legacy_datastore(datastore)
+        if was_migrated:
+            save_datastore(datastore, store_path)
+        
+        # Verify passphrase
+        if not verify_passphrase(datastore, ask_passphrase.passphrase):
+            sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
+            sys.exit()
+        
+        # Get encryption key using datastore's key derivation method
+        encryption_key = get_encryption_key_from_datastore(datastore, ask_passphrase.passphrase)
     
-    try:
-        assert encryption_key is not None, 'No encryption key provided'
-        assert len(encryption_key) == 32, 'Incorrect encryption key length'
-    except AssertionError as e:
-        sys.stderr.write(f'Encryption key error: {str(e)}\r\nERROR: Unable to unlock datastore\r\n\r\n')
-        sys.exit()
-    
-    datastore = load_datastore(store_path)
-    
-    was_migrated = migrate_legacy_datastore(datastore)
-    if was_migrated:
-        save_datastore(datastore, store_path)
-    
-    # Verify passphrase
-    if not verify_passphrase(datastore, encryption_key, expected_challenge):
-        sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
-        sys.exit()
-    
-    # Clear sensitive challenge data (keep encryption_key for operations)
-    del expected_challenge
     print('Datastore unlocked')
     
     root.attributes('-topmost', True)
@@ -247,12 +239,13 @@ def create_main_window(store_path: str):
             return  # User cancelled
         
         try:
-            migration_key = derive_key(migrate_dialog.passphrase)
-            
-            # Verify passphrase matches current encryption key
-            if migration_key != encryption_key:
+            # Verify passphrase
+            if not verify_passphrase(datastore, migrate_dialog.passphrase):
                 mbox.showerror('Migration Failed', 'Incorrect passphrase')
                 return
+            
+            # Get encryption key using datastore's key derivation method
+            migration_key = get_encryption_key_from_datastore(datastore, migrate_dialog.passphrase)
             
             # Perform migration
             success = migrate_datastore_to_gcm(store_path, migration_key, migrate_dialog.passphrase)

@@ -10,12 +10,10 @@ import getpass
 from json import loads
 from base64 import b64decode
 
-from pwmanager.crypto import (
-    derive_key, derive_challenge
-)
 from pwmanager.datastore import (
     load_datastore, save_datastore, migrate_legacy_datastore,
-    decrypt_entry, migrate_datastore_to_gcm, verify_passphrase
+    decrypt_entry, migrate_datastore_to_gcm, verify_passphrase,
+    get_encryption_key_from_datastore
 )
 
 
@@ -92,9 +90,6 @@ def terminal_mode(store_path: str, search_term: str = None):
     except (EOFError, KeyboardInterrupt):
         sys.exit(0)
     
-    encryption_key = derive_key(passphrase)
-    expected_challenge = derive_challenge(passphrase)
-    
     try:
         datastore = load_datastore(store_path)
         
@@ -102,15 +97,17 @@ def terminal_mode(store_path: str, search_term: str = None):
         if was_migrated:
             save_datastore(datastore, store_path)
         
-        if not verify_passphrase(datastore, encryption_key, expected_challenge):
+        if not verify_passphrase(datastore, passphrase):
             sys.stderr.write('ERROR: Incorrect passphrase\n')
             sys.exit(1)
+        
+        encryption_key = get_encryption_key_from_datastore(datastore, passphrase)
         
     except ValueError as e:
         sys.stderr.write(f'ERROR: {str(e)}\n')
         sys.exit(1)
-    except AssertionError as e:
-        sys.stderr.write(f'ERROR: Challenge verification failed - {str(e)}\n')
+    except Exception as e:
+        sys.stderr.write(f'ERROR: {str(e)}\n')
         sys.exit(1)
     
     print('Datastore unlocked successfully!')
@@ -137,9 +134,12 @@ def migration_mode(store_path: str):
     except (EOFError, KeyboardInterrupt):
         sys.exit(0)
     
-    encryption_key = derive_key(passphrase)
-    
     try:
+        datastore = load_datastore(store_path)
+        migrate_legacy_datastore(datastore)
+        
+        encryption_key = get_encryption_key_from_datastore(datastore, passphrase)
+        
         success = migrate_datastore_to_gcm(store_path, encryption_key, passphrase)
         if success:
             print('Migration completed successfully!')

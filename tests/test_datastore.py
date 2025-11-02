@@ -24,7 +24,10 @@ from pwmanager.datastore import (
     load_datastore, save_datastore, verify_passphrase, initialize_datastore,
     decrypt_entry, encrypt_entry, migrate_datastore_to_gcm
 )
-from pwmanager.crypto import AES_BLOCK_SIZE, get_random_bytes, LEGACY_CIPHER, LEGACY_CIPHER_MODE
+from pwmanager.crypto import (
+    AES_BLOCK_SIZE, get_random_bytes, LEGACY_CIPHER, LEGACY_CIPHER_MODE,
+    LEGACY_KEY_DERIVATION, DEFAULT_CIPHER, DEFAULT_CIPHER_MODE
+)
 
 
 class TestValidateStorePath:
@@ -62,8 +65,10 @@ class TestMigrateLegacyDatastore:
         assert was_migrated is True
         assert 'cipher' in legacy_datastore
         assert 'cipher_mode' in legacy_datastore
+        assert 'key_derivation' in legacy_datastore
         assert legacy_datastore['cipher'] == LEGACY_CIPHER
         assert legacy_datastore['cipher_mode'] == LEGACY_CIPHER_MODE
+        assert legacy_datastore['key_derivation'] == LEGACY_KEY_DERIVATION
     
     def test_already_migrated_datastore(self, cbc_datastore):
         """Test that already migrated datastore is not migrated again"""
@@ -124,27 +129,27 @@ class TestDatastoreFileOperations:
 class TestVerifyPassphrase:
     """Test passphrase verification"""
     
-    def test_verify_correct_passphrase_cbc(self, temp_datastore_path, cbc_datastore, test_key, test_challenge):
+    def test_verify_correct_passphrase_cbc(self, temp_datastore_path, cbc_datastore, test_passphrase):
         """Test verification with correct passphrase in CBC mode"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
         save_datastore(cbc_datastore, temp_datastore_path)
         
-        assert verify_passphrase(cbc_datastore, test_key, test_challenge) is True
+        assert verify_passphrase(cbc_datastore, test_passphrase) is True
     
-    def test_verify_correct_passphrase_gcm(self, temp_datastore_path, gcm_datastore, test_key, test_challenge):
+    def test_verify_correct_passphrase_gcm(self, temp_datastore_path, gcm_datastore, test_passphrase):
         """Test verification with correct passphrase in GCM mode"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
         save_datastore(gcm_datastore, temp_datastore_path)
         
-        assert verify_passphrase(gcm_datastore, test_key, test_challenge) is True
+        assert verify_passphrase(gcm_datastore, test_passphrase) is True
     
-    def test_verify_wrong_passphrase(self, temp_datastore_path, cbc_datastore, test_challenge):
+    def test_verify_wrong_passphrase(self, temp_datastore_path, cbc_datastore):
         """Test verification with wrong passphrase"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
         save_datastore(cbc_datastore, temp_datastore_path)
         
-        wrong_key = SHA256.new(data="wrong_passphrase".encode('utf-8')).digest()
-        assert verify_passphrase(cbc_datastore, wrong_key, test_challenge) is False
+        wrong_passphrase = "wrong_passphrase"
+        assert verify_passphrase(cbc_datastore, wrong_passphrase) is False
 
 
 class TestInitializeDatastore:

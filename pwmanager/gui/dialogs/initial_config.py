@@ -6,7 +6,6 @@ Dialog used when initializing a new datastore.
 
 import tkinter as tk
 
-from pwmanager.crypto import derive_key, derive_challenge
 from pwmanager.datastore import initialize_datastore
 
 
@@ -66,8 +65,6 @@ class InitialConfig:
             padx=2,
             pady=2
         )
-        self.key = None
-        self.challenge = None
         dialog_window.grab_set()
         dialog_window.attributes('-topmost', True)
         dialog_window.protocol('WM_DELETE_WINDOW', self.ok)
@@ -97,9 +94,6 @@ class InitialConfig:
         Creates (if needed) the datastore and locks it with the given passphrase.
         """
         passphrase = self.passphrase_entry1.get()
-        self.key = derive_key(passphrase)
-        self.challenge = derive_challenge(passphrase)
-        
         initialize_datastore(self.store_path, passphrase)
         
         self.top.grab_release()

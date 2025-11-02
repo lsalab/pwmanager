@@ -80,7 +80,7 @@ def legacy_datastore():
 
 @pytest.fixture
 def cbc_datastore(test_key, test_challenge):
-    """Create a CBC mode datastore"""
+    """Create a CBC mode datastore with SHA256 key derivation (legacy)"""
     iv = get_random_bytes(AES_BLOCK_SIZE)
     cipher = AES.new(test_key, AES.MODE_CBC, iv=iv)
     encrypted_challenge = cipher.encrypt(pad(test_challenge, AES.block_size))
@@ -88,6 +88,7 @@ def cbc_datastore(test_key, test_challenge):
     return {
         'cipher': LEGACY_CIPHER,
         'cipher_mode': LEGACY_CIPHER_MODE,
+        'key_derivation': 'SHA256',  # Legacy SHA256
         'iv': b64encode(iv).decode('utf-8'),
         'challenge': b64encode(encrypted_challenge).decode('utf-8'),
         'store': {}
@@ -96,7 +97,7 @@ def cbc_datastore(test_key, test_challenge):
 
 @pytest.fixture
 def gcm_datastore(test_key, test_challenge):
-    """Create a GCM mode datastore"""
+    """Create a GCM mode datastore with SHA256 key derivation (legacy)"""
     iv = get_random_bytes(AES_BLOCK_SIZE)
     cipher = AES.new(test_key, AES.MODE_GCM, nonce=iv)
     encrypted_challenge, tag = cipher.encrypt_and_digest(test_challenge)
@@ -104,6 +105,7 @@ def gcm_datastore(test_key, test_challenge):
     return {
         'cipher': DEFAULT_CIPHER,
         'cipher_mode': DEFAULT_CIPHER_MODE,
+        'key_derivation': 'SHA256',  # Legacy SHA256
         'iv': b64encode(iv).decode('utf-8'),
         'challenge': b64encode(encrypted_challenge).decode('utf-8'),
         'tag': b64encode(tag).decode('utf-8'),

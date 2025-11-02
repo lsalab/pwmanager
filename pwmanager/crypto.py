@@ -12,12 +12,14 @@ try:
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
     from Crypto.Util.Padding import pad, unpad
+    from Crypto.Protocol.KDF import PBKDF2
 except (ImportError, ModuleNotFoundError):
     try:
         from Cryptodome.Hash import SHA256
         from Cryptodome.Cipher import AES
         from Cryptodome.Random import get_random_bytes
         from Cryptodome.Util.Padding import pad, unpad
+        from Cryptodome.Protocol.KDF import PBKDF2
     except ImportError as e:
         sys.stderr.write(
             "ERROR: Could not import cryptographic libraries.\n"
@@ -34,6 +36,12 @@ from base64 import b64encode, b64decode
 AES_BLOCK_SIZE = 16
 AES_KEY_SIZE = 32
 PASSWORD_LENGTH = 24
+
+# Key derivation constants
+LEGACY_KEY_DERIVATION = 'SHA256'
+DEFAULT_KEY_DERIVATION = 'PBKDF2'
+PBKDF2_ITERATIONS = 100000  # Recommended minimum for PBKDF2
+PBKDF2_SALT_SIZE = 16  # 128 bits
 
 # Cryptographic defaults
 LEGACY_CIPHER = 'AES'
@@ -73,9 +81,9 @@ def get_aes_mode(cipher_mode: str):
     return mode_map[cipher_mode_upper]
 
 
-def derive_key(passphrase: str) -> bytes:
+def derive_key_sha256(passphrase: str) -> bytes:
     """
-    Derive encryption key from passphrase using SHA-256.
+    Derive encryption key from passphrase using SHA-256 (legacy method).
     
     Args:
         passphrase: User passphrase
@@ -86,9 +94,51 @@ def derive_key(passphrase: str) -> bytes:
     return SHA256.new(data=passphrase.encode('utf-8')).digest()
 
 
-def derive_challenge(passphrase: str) -> bytes:
+def derive_key_pbkdf2(passphrase: str, salt: bytes, iterations: int = PBKDF2_ITERATIONS) -> bytes:
     """
-    Derive challenge from passphrase.
+    Derive encryption key from passphrase using PBKDF2 (recommended).
+    
+    Args:
+        passphrase: User passphrase
+        salt: Salt bytes (typically 16 bytes)
+        iterations: Number of PBKDF2 iterations (default: 100000)
+        
+    Returns:
+        PBKDF2-derived key as bytes (32 bytes)
+    """
+    return PBKDF2(passphrase.encode('utf-8'), salt, dkLen=AES_KEY_SIZE, count=iterations)
+
+
+def derive_key(passphrase: str, key_derivation: str = DEFAULT_KEY_DERIVATION, 
+               salt: bytes = None, iterations: int = PBKDF2_ITERATIONS) -> bytes:
+    """
+    Derive encryption key from passphrase using specified method.
+    
+    Args:
+        passphrase: User passphrase
+        key_derivation: Key derivation method ('SHA256' or 'PBKDF2')
+        salt: Salt bytes for PBKDF2 (required if key_derivation is 'PBKDF2')
+        iterations: Number of PBKDF2 iterations (only used for PBKDF2)
+        
+    Returns:
+        Derived key as bytes (32 bytes)
+        
+    Raises:
+        ValueError: If salt is required but not provided for PBKDF2
+    """
+    if key_derivation == 'SHA256':
+        return derive_key_sha256(passphrase)
+    elif key_derivation == 'PBKDF2':
+        if salt is None:
+            raise ValueError('Salt is required for PBKDF2 key derivation')
+        return derive_key_pbkdf2(passphrase, salt, iterations)
+    else:
+        raise ValueError(f'Unsupported key derivation method: {key_derivation}')
+
+
+def derive_challenge_sha256(passphrase: str) -> bytes:
+    """
+    Derive challenge from passphrase using SHA-256 (legacy method).
     
     The challenge is the SHA-256 digest of the ones complement of the passphrase.
     
@@ -102,6 +152,53 @@ def derive_challenge(passphrase: str) -> bytes:
     for char in passphrase:
         challenge_string += chr(ord(char) ^ 0xff)
     return SHA256.new(data=challenge_string.encode('utf-8')).digest()
+
+
+def derive_challenge_pbkdf2(passphrase: str, salt: bytes, iterations: int = PBKDF2_ITERATIONS) -> bytes:
+    """
+    Derive challenge from passphrase using PBKDF2 (recommended).
+    
+    The challenge uses PBKDF2 with the ones complement of the passphrase.
+    
+    Args:
+        passphrase: User passphrase
+        salt: Salt bytes (typically 16 bytes)
+        iterations: Number of PBKDF2 iterations (default: 100000)
+        
+    Returns:
+        PBKDF2-derived challenge as bytes (32 bytes)
+    """
+    challenge_string = ''
+    for char in passphrase:
+        challenge_string += chr(ord(char) ^ 0xff)
+    return PBKDF2(challenge_string.encode('utf-8'), salt, dkLen=AES_KEY_SIZE, count=iterations)
+
+
+def derive_challenge(passphrase: str, key_derivation: str = DEFAULT_KEY_DERIVATION,
+                     salt: bytes = None, iterations: int = PBKDF2_ITERATIONS) -> bytes:
+    """
+    Derive challenge from passphrase using specified method.
+    
+    Args:
+        passphrase: User passphrase
+        key_derivation: Key derivation method ('SHA256' or 'PBKDF2')
+        salt: Salt bytes for PBKDF2 (required if key_derivation is 'PBKDF2')
+        iterations: Number of PBKDF2 iterations (only used for PBKDF2)
+        
+    Returns:
+        Derived challenge as bytes (32 bytes)
+        
+    Raises:
+        ValueError: If salt is required but not provided for PBKDF2
+    """
+    if key_derivation == 'SHA256':
+        return derive_challenge_sha256(passphrase)
+    elif key_derivation == 'PBKDF2':
+        if salt is None:
+            raise ValueError('Salt is required for PBKDF2 challenge derivation')
+        return derive_challenge_pbkdf2(passphrase, salt, iterations)
+    else:
+        raise ValueError(f'Unsupported key derivation method: {key_derivation}')
 
 
 def generate_random_password() -> str:
