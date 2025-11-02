@@ -8,12 +8,10 @@ from json import dumps
 
 # Import cryptographic libraries
 try:
-    from Crypto.Hash import SHA256
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
     from Crypto.Util.Padding import pad, unpad
 except ImportError:
-    from Cryptodome.Hash import SHA256
     from Cryptodome.Cipher import AES
     from Cryptodome.Random import get_random_bytes
     from Cryptodome.Util.Padding import pad, unpad
@@ -22,7 +20,8 @@ from pwmanager.crypto import (
     get_aes_mode, derive_key, derive_challenge, generate_random_password,
     encrypt_data, decrypt_data,
     AES_BLOCK_SIZE, AES_KEY_SIZE, PASSWORD_LENGTH,
-    LEGACY_CIPHER, LEGACY_CIPHER_MODE, DEFAULT_CIPHER, DEFAULT_CIPHER_MODE
+    LEGACY_CIPHER, LEGACY_CIPHER_MODE, DEFAULT_CIPHER, DEFAULT_CIPHER_MODE,
+    PBKDF2_ITERATIONS, PBKDF2_SALT_SIZE, get_random_bytes
 )
 
 
@@ -57,85 +56,56 @@ class TestGetAESMode:
 class TestKeyDerivation:
     """Test key derivation functions"""
     
-    def test_derive_key_sha256(self, test_passphrase, test_key):
-        """Test SHA256 key derivation from passphrase (legacy)"""
-        from pwmanager.crypto import derive_key_sha256
-        derived_key = derive_key_sha256(test_passphrase)
-        assert derived_key == test_key
-        assert len(derived_key) == AES_KEY_SIZE
-    
-    def test_derive_challenge_sha256(self, test_passphrase, test_challenge):
-        """Test SHA256 challenge derivation from passphrase (legacy)"""
-        from pwmanager.crypto import derive_challenge_sha256
-        derived_challenge = derive_challenge_sha256(test_passphrase)
-        assert derived_challenge == test_challenge
-        assert len(derived_challenge) == 32
-    
-    def test_derive_key_pbkdf2(self, test_passphrase):
+    def test_derive_key(self, test_passphrase):
         """Test PBKDF2 key derivation from passphrase"""
-        from pwmanager.crypto import derive_key_pbkdf2, get_random_bytes, PBKDF2_SALT_SIZE
         salt = get_random_bytes(PBKDF2_SALT_SIZE)
-        derived_key = derive_key_pbkdf2(test_passphrase, salt)
+        derived_key = derive_key(test_passphrase, salt)
         assert len(derived_key) == AES_KEY_SIZE
         # Same passphrase + salt should produce same key
-        derived_key2 = derive_key_pbkdf2(test_passphrase, salt)
+        derived_key2 = derive_key(test_passphrase, salt)
         assert derived_key == derived_key2
         # Different salt should produce different key
         salt2 = get_random_bytes(PBKDF2_SALT_SIZE)
-        derived_key3 = derive_key_pbkdf2(test_passphrase, salt2)
+        derived_key3 = derive_key(test_passphrase, salt2)
         assert derived_key != derived_key3
     
-    def test_derive_challenge_pbkdf2(self, test_passphrase):
+    def test_derive_challenge(self, test_passphrase):
         """Test PBKDF2 challenge derivation from passphrase"""
-        from pwmanager.crypto import derive_challenge_pbkdf2, get_random_bytes, PBKDF2_SALT_SIZE
         salt = get_random_bytes(PBKDF2_SALT_SIZE)
-        derived_challenge = derive_challenge_pbkdf2(test_passphrase, salt)
+        derived_challenge = derive_challenge(test_passphrase, salt)
         assert len(derived_challenge) == 32
         # Same passphrase + salt should produce same challenge
-        derived_challenge2 = derive_challenge_pbkdf2(test_passphrase, salt)
+        derived_challenge2 = derive_challenge(test_passphrase, salt)
         assert derived_challenge == derived_challenge2
     
-    def test_empty_passphrase_key_sha256(self):
-        """Test SHA256 key derivation with empty passphrase"""
-        from pwmanager.crypto import derive_key_sha256
-        key = derive_key_sha256("")
+    def test_empty_passphrase_key(self):
+        """Test PBKDF2 key derivation with empty passphrase"""
+        salt = get_random_bytes(PBKDF2_SALT_SIZE)
+        key = derive_key("", salt)
         assert len(key) == AES_KEY_SIZE
     
-    def test_empty_passphrase_challenge_sha256(self):
-        """Test SHA256 challenge derivation with empty passphrase"""
-        from pwmanager.crypto import derive_challenge_sha256
-        challenge = derive_challenge_sha256("")
+    def test_empty_passphrase_challenge(self):
+        """Test PBKDF2 challenge derivation with empty passphrase"""
+        salt = get_random_bytes(PBKDF2_SALT_SIZE)
+        challenge = derive_challenge("", salt)
         assert len(challenge) == 32
     
-    def test_unicode_passphrase(self, test_passphrase):
+    def test_unicode_passphrase(self):
         """Test with unicode passphrase"""
-        from pwmanager.crypto import derive_key_sha256, derive_challenge_sha256
         passphrase = "test_密码_🔒"
-        key = derive_key_sha256(passphrase)
+        salt = get_random_bytes(PBKDF2_SALT_SIZE)
+        key = derive_key(passphrase, salt)
         assert len(key) == AES_KEY_SIZE
         
-        challenge = derive_challenge_sha256(passphrase)
+        challenge = derive_challenge(passphrase, salt)
         assert len(challenge) == 32
     
-    def test_derive_key_without_salt_fails(self, test_passphrase):
-        """Test that derive_key fails without salt for PBKDF2"""
-        from pwmanager.crypto import DEFAULT_KEY_DERIVATION
-        # Should fail when using PBKDF2 without salt
-        try:
-            derive_key(test_passphrase, DEFAULT_KEY_DERIVATION)
-            assert False, "Should have raised ValueError"
-        except ValueError:
-            pass  # Expected
-    
-    def test_derive_challenge_without_salt_fails(self, test_passphrase):
-        """Test that derive_challenge fails without salt for PBKDF2"""
-        from pwmanager.crypto import DEFAULT_KEY_DERIVATION
-        # Should fail when using PBKDF2 without salt
-        try:
-            derive_challenge(test_passphrase, DEFAULT_KEY_DERIVATION)
-            assert False, "Should have raised ValueError"
-        except ValueError:
-            pass  # Expected
+    def test_different_iterations(self, test_passphrase):
+        """Test that different iterations produce different keys"""
+        salt = get_random_bytes(PBKDF2_SALT_SIZE)
+        key1 = derive_key(test_passphrase, salt, iterations=10000)
+        key2 = derive_key(test_passphrase, salt, iterations=100000)
+        assert key1 != key2
 
 
 class TestRandomPassword:

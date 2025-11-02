@@ -12,17 +12,17 @@ from base64 import b64encode, b64decode
 from copy import deepcopy
 
 from pwmanager.crypto import (
-    get_aes_mode, derive_key, derive_challenge, derive_key_sha256, derive_challenge_sha256,
+    get_aes_mode, derive_key, derive_challenge,
     encrypt_data, decrypt_data,
     AES, LEGACY_CIPHER, LEGACY_CIPHER_MODE, DEFAULT_CIPHER, DEFAULT_CIPHER_MODE,
-    LEGACY_KEY_DERIVATION, DEFAULT_KEY_DERIVATION, PBKDF2_ITERATIONS, PBKDF2_SALT_SIZE,
+    PBKDF2_ITERATIONS, PBKDF2_SALT_SIZE,
     AES_BLOCK_SIZE, get_random_bytes
 )
-# Import unpad from Crypto - needed for migration operations
+# Import pad and unpad from Crypto - needed for migration operations
 try:
-    from Crypto.Util.Padding import unpad as unpad_util
+    from Crypto.Util.Padding import pad as pad_util, unpad as unpad_util
 except ImportError:
-    from Cryptodome.Util.Padding import unpad as unpad_util
+    from Cryptodome.Util.Padding import pad as pad_util, unpad as unpad_util
 
 
 def validate_store_path(path: str) -> bool:
@@ -50,8 +50,8 @@ def migrate_legacy_datastore(datastore: dict) -> bool:
     """
     Migrate legacy datastores by adding cryptographic parameters.
     
-    Detects legacy datastores (those without 'cipher', 'cipher_mode', or 'key_derivation' keys)
-    and adds them with the current legacy values (AES, CBC, SHA256).
+    Detects legacy datastores (those without 'cipher' or 'cipher_mode' keys)
+    and adds them with the current legacy values (AES, CBC).
     
     Args:
         datastore: The datastore dictionary to check and potentially migrate
@@ -67,12 +67,6 @@ def migrate_legacy_datastore(datastore: dict) -> bool:
         datastore['cipher'] = LEGACY_CIPHER
         datastore['cipher_mode'] = LEGACY_CIPHER_MODE
         print('Legacy datastore detected. Added cryptographic parameters (cipher: AES, cipher_mode: CBC)')
-    
-    # Check for missing key_derivation (SHA256 legacy)
-    if 'key_derivation' not in datastore:
-        was_legacy = True
-        datastore['key_derivation'] = LEGACY_KEY_DERIVATION
-        print('Legacy key derivation detected. Added key_derivation parameter (SHA256)')
     
     return was_legacy
 
@@ -147,8 +141,7 @@ def verify_passphrase(datastore: dict, passphrase: str) -> bool:
     """
     Verify passphrase by decrypting and checking challenge.
     
-    Uses the datastore's key_derivation method (SHA256 or PBKDF2) to derive
-    the encryption key and challenge, then verifies by decrypting the stored challenge.
+    Uses PBKDF2 to derive the encryption key and challenge, then verifies by decrypting the stored challenge.
     
     Args:
         datastore: The datastore dictionary
@@ -158,23 +151,15 @@ def verify_passphrase(datastore: dict, passphrase: str) -> bool:
         True if passphrase is correct, False otherwise
         
     Raises:
-        ValueError: If decryption fails or cipher mode is invalid
+        ValueError: If decryption fails, cipher mode is invalid, or salt/iterations are missing
     """
-    key_derivation = datastore.get('key_derivation', LEGACY_KEY_DERIVATION)
+    if 'salt' not in datastore or 'iterations' not in datastore:
+        raise ValueError('PBKDF2 datastore missing salt or iterations')
     
-    # Derive key and challenge using the datastore's key derivation method
-    if key_derivation == 'SHA256':
-        encryption_key = derive_key_sha256(passphrase)
-        challenge = derive_challenge_sha256(passphrase)
-    elif key_derivation == 'PBKDF2':
-        if 'salt' not in datastore or 'iterations' not in datastore:
-            raise ValueError('PBKDF2 datastore missing salt or iterations')
-        salt = b64decode(datastore['salt'])
-        iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
-        encryption_key = derive_key(passphrase, 'PBKDF2', salt, iterations)
-        challenge = derive_challenge(passphrase, 'PBKDF2', salt, iterations)
-    else:
-        raise ValueError(f'Unsupported key derivation method: {key_derivation}')
+    salt = b64decode(datastore['salt'])
+    iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
+    encryption_key = derive_key(passphrase, salt, iterations)
+    challenge = derive_challenge(passphrase, salt, iterations)
     
     iv = b64decode(datastore['iv'])
     cipher_mode = datastore.get('cipher_mode', LEGACY_CIPHER_MODE)
@@ -202,7 +187,7 @@ def verify_passphrase(datastore: dict, passphrase: str) -> bool:
 
 def get_encryption_key_from_datastore(datastore: dict, passphrase: str) -> bytes:
     """
-    Get encryption key from datastore using the appropriate key derivation method.
+    Get encryption key from datastore using PBKDF2.
     
     Args:
         datastore: The datastore dictionary
@@ -212,20 +197,13 @@ def get_encryption_key_from_datastore(datastore: dict, passphrase: str) -> bytes
         Encryption key as bytes (32 bytes)
         
     Raises:
-        ValueError: If key derivation method is unsupported or parameters are missing
+        ValueError: If salt or iterations are missing
     """
-    key_derivation = datastore.get('key_derivation', LEGACY_KEY_DERIVATION)
-    
-    if key_derivation == 'SHA256':
-        return derive_key_sha256(passphrase)
-    elif key_derivation == 'PBKDF2':
-        if 'salt' not in datastore:
-            raise ValueError('PBKDF2 datastore missing salt')
-        salt = b64decode(datastore['salt'])
-        iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
-        return derive_key(passphrase, 'PBKDF2', salt, iterations)
-    else:
-        raise ValueError(f'Unsupported key derivation method: {key_derivation}')
+    if 'salt' not in datastore:
+        raise ValueError('PBKDF2 datastore missing salt')
+    salt = b64decode(datastore['salt'])
+    iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
+    return derive_key(passphrase, salt, iterations)
 
 
 def initialize_datastore(store_path: str, passphrase: str):
@@ -235,7 +213,7 @@ def initialize_datastore(store_path: str, passphrase: str):
     The datastore is created with the default cryptographic parameters:
     - Cipher: AES (as specified by DEFAULT_CIPHER)
     - Mode: GCM by default (as specified by DEFAULT_CIPHER_MODE)
-    - Key Derivation: PBKDF2 (as specified by DEFAULT_KEY_DERIVATION)
+    - Key Derivation: PBKDF2
     
     Args:
         store_path: Path where to create the datastore
@@ -245,15 +223,15 @@ def initialize_datastore(store_path: str, passphrase: str):
     salt = get_random_bytes(PBKDF2_SALT_SIZE)
     
     # Derive key and challenge using PBKDF2
-    encryption_key = derive_key(passphrase, DEFAULT_KEY_DERIVATION, salt, PBKDF2_ITERATIONS)
-    challenge = derive_challenge(passphrase, DEFAULT_KEY_DERIVATION, salt, PBKDF2_ITERATIONS)
+    encryption_key = derive_key(passphrase, salt, PBKDF2_ITERATIONS)
+    challenge = derive_challenge(passphrase, salt, PBKDF2_ITERATIONS)
     
     config_data = {
         'store': {},
         'iv': b64encode(get_random_bytes(AES_BLOCK_SIZE)).decode('utf-8'),
         'cipher': DEFAULT_CIPHER,
         'cipher_mode': DEFAULT_CIPHER_MODE,
-        'key_derivation': DEFAULT_KEY_DERIVATION,
+        'key_derivation': 'PBKDF2',
         'salt': b64encode(salt).decode('utf-8'),
         'iterations': PBKDF2_ITERATIONS
     }
@@ -311,155 +289,6 @@ def encrypt_entry(username: str, password: str, encryption_key: bytes, cipher_mo
     entry_data_json = dumps(entry_data).encode('utf-8')
     return encrypt_data(entry_data_json, encryption_key, cipher_mode)
 
-
-def migrate_datastore_key_derivation_to_pbkdf2(store_path: str, passphrase: str) -> bool:
-    """
-    Migrate a SHA256-based datastore to PBKDF2 key derivation.
-    
-    This function:
-    1. Loads the datastore and verifies it uses SHA256 key derivation
-    2. Creates a backup of the original file
-    3. Decrypts all entries using SHA256-derived keys
-    4. Re-encrypts all entries and challenge using PBKDF2-derived keys
-    5. Updates the datastore metadata
-    6. Saves the migrated datastore
-    
-    Args:
-        store_path: Path to the datastore file to migrate
-        passphrase: The passphrase (used for both old and new key derivation)
-        
-    Returns:
-        True if migration was successful, False if the datastore already uses PBKDF2
-        
-    Raises:
-        ValueError: If the datastore is not using SHA256 or if decryption fails
-        IOError: If the file cannot be read or written
-    """
-    if not os.path.exists(store_path):
-        raise IOError(f'Datastore file not found: {store_path}')
-    
-    # Load the datastore
-    datastore = load_datastore(store_path)
-    
-    # Ensure legacy datastores have key_derivation parameter
-    migrate_legacy_datastore(datastore)
-    
-    # Check if already using PBKDF2
-    key_derivation = datastore.get('key_derivation', LEGACY_KEY_DERIVATION)
-    if key_derivation == 'PBKDF2':
-        print(f'Datastore at {store_path} already uses PBKDF2 key derivation. No migration needed.')
-        return False
-    
-    if key_derivation != 'SHA256':
-        raise ValueError(f'Unsupported key derivation for migration: {key_derivation}. Only SHA256 can be migrated to PBKDF2.')
-    
-    print(f'Migrating datastore from SHA256 to PBKDF2 key derivation: {store_path}')
-    
-    # Create backup
-    backup_path = create_backup_file(store_path)
-    
-    try:
-        # Derive keys using old SHA256 method
-        old_key = derive_key_sha256(passphrase)
-        old_challenge = derive_challenge_sha256(passphrase)
-        
-        # Verify the passphrase by decrypting the challenge
-        cipher_mode = datastore.get('cipher_mode', LEGACY_CIPHER_MODE)
-        aes_mode = get_aes_mode(cipher_mode)
-        iv = b64decode(datastore['iv'])
-        challenge_encrypted = b64decode(datastore['challenge'])
-        
-        if cipher_mode == 'GCM':
-            cipher = AES.new(old_key, aes_mode, nonce=iv)
-            if 'tag' not in datastore:
-                raise ValueError('GCM mode requires authentication tag')
-            challenge_decrypted = cipher.decrypt_and_verify(challenge_encrypted, b64decode(datastore['tag']))
-        else:
-            cipher = AES.new(old_key, aes_mode, iv=iv)
-            challenge_decrypted = cipher.decrypt(challenge_encrypted)
-            challenge_decrypted = unpad_util(challenge_decrypted, AES.block_size)
-        
-        if challenge_decrypted != old_challenge:
-            raise ValueError('Passphrase verification failed. Incorrect passphrase.')
-        
-        # Generate new salt for PBKDF2
-        new_salt = get_random_bytes(PBKDF2_SALT_SIZE)
-        new_key = derive_key(passphrase, 'PBKDF2', new_salt, PBKDF2_ITERATIONS)
-        new_challenge = derive_challenge(passphrase, 'PBKDF2', new_salt, PBKDF2_ITERATIONS)
-        
-        # Re-encrypt challenge with new key
-        new_iv = get_random_bytes(AES_BLOCK_SIZE)
-        if cipher_mode == 'GCM':
-            new_cipher = AES.new(new_key, aes_mode, nonce=new_iv)
-            new_challenge_ciphertext, new_challenge_tag = new_cipher.encrypt_and_digest(new_challenge)
-            datastore['iv'] = b64encode(new_iv).decode('utf-8')
-            datastore['challenge'] = b64encode(new_challenge_ciphertext).decode('utf-8')
-            datastore['tag'] = b64encode(new_challenge_tag).decode('utf-8')
-        else:
-            new_cipher = AES.new(new_key, aes_mode, iv=new_iv)
-            from Crypto.Util.Padding import pad as pad_util
-            new_challenge_ciphertext = new_cipher.encrypt(pad_util(new_challenge, AES.block_size))
-            datastore['iv'] = b64encode(new_iv).decode('utf-8')
-            datastore['challenge'] = b64encode(new_challenge_ciphertext).decode('utf-8')
-        
-        # Migrate all entries from SHA256 keys to PBKDF2 keys
-        migrated_entries = {}
-        for site_name, entry in datastore['store'].items():
-            # Decrypt entry using old SHA256 key
-            entry_iv = b64decode(entry['iv'])
-            entry_data_encrypted = b64decode(entry['data'])
-            
-            if cipher_mode == 'GCM':
-                if 'tag' not in entry:
-                    continue
-                entry_tag = b64decode(entry['tag'])
-                entry_cipher_old = AES.new(old_key, aes_mode, nonce=entry_iv)
-                entry_data_decrypted = entry_cipher_old.decrypt_and_verify(entry_data_encrypted, entry_tag)
-            else:
-                entry_cipher_old = AES.new(old_key, aes_mode, iv=entry_iv)
-                entry_data_decrypted = entry_cipher_old.decrypt(entry_data_encrypted)
-                entry_data_decrypted = unpad_util(entry_data_decrypted, AES.block_size)
-            
-            # Re-encrypt entry using new PBKDF2 key
-            new_entry_iv = get_random_bytes(AES_BLOCK_SIZE)
-            
-            if cipher_mode == 'GCM':
-                entry_cipher_new = AES.new(new_key, aes_mode, nonce=new_entry_iv)
-                entry_data_reencrypted, entry_tag = entry_cipher_new.encrypt_and_digest(entry_data_decrypted)
-                migrated_entries[site_name] = {
-                    'iv': b64encode(new_entry_iv).decode('utf-8'),
-                    'data': b64encode(entry_data_reencrypted).decode('utf-8'),
-                    'tag': b64encode(entry_tag).decode('utf-8')
-                }
-            else:
-                entry_cipher_new = AES.new(new_key, aes_mode, iv=new_entry_iv)
-                from Crypto.Util.Padding import pad as pad_util
-                entry_data_reencrypted = entry_cipher_new.encrypt(pad_util(entry_data_decrypted, AES.block_size))
-                migrated_entries[site_name] = {
-                    'iv': b64encode(new_entry_iv).decode('utf-8'),
-                    'data': b64encode(entry_data_reencrypted).decode('utf-8')
-                }
-        
-        # Update datastore with migrated entries and metadata
-        datastore['store'] = migrated_entries
-        datastore['key_derivation'] = DEFAULT_KEY_DERIVATION
-        datastore['salt'] = b64encode(new_salt).decode('utf-8')
-        datastore['iterations'] = PBKDF2_ITERATIONS
-        
-        # Save migrated datastore
-        save_datastore(datastore, store_path)
-        print(f'Successfully migrated datastore to PBKDF2 key derivation. Backup saved at: {backup_path}')
-        
-        return True
-        
-    except Exception as e:
-        # If migration fails, restore from backup
-        print(f'Migration failed: {str(e)}')
-        print(f'Restoring from backup: {backup_path}')
-        shutil.copy2(backup_path, store_path)
-        raise
-
-
 def migrate_datastore_to_gcm(store_path: str, encryption_key: bytes, passphrase: str = None) -> bool:
     """
     Migrate a CBC (legacy) datastore to GCM mode.
@@ -516,21 +345,15 @@ def migrate_datastore_to_gcm(store_path: str, encryption_key: bytes, passphrase:
         old_challenge = old_cipher.decrypt(old_challenge_encrypted)
         old_challenge = unpad_util(old_challenge, AES.block_size)
         
-        # If passphrase is provided, verify it (for SHA256 legacy support)
-        key_derivation = datastore.get('key_derivation', LEGACY_KEY_DERIVATION)
+        # If passphrase is provided, verify it
         if passphrase:
-            if key_derivation == 'SHA256':
-                expected_challenge = derive_challenge_sha256(passphrase)
-            elif key_derivation == 'PBKDF2':
-                if 'salt' not in datastore:
-                    raise ValueError('PBKDF2 datastore missing salt')
-                salt = b64decode(datastore['salt'])
-                iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
-                expected_challenge = derive_challenge(passphrase, 'PBKDF2', salt, iterations)
-            else:
-                expected_challenge = None
+            if 'salt' not in datastore:
+                raise ValueError('PBKDF2 datastore missing salt')
+            salt = b64decode(datastore['salt'])
+            iterations = datastore.get('iterations', PBKDF2_ITERATIONS)
+            expected_challenge = derive_challenge(passphrase, salt, iterations)
             
-            if expected_challenge and expected_challenge != old_challenge:
+            if expected_challenge != old_challenge:
                 raise ValueError('Passphrase verification failed. Incorrect passphrase.')
         
         # Migrate challenge to GCM

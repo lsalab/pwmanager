@@ -42,22 +42,22 @@ python3 pwmanager.py -s /path/to/datastore.pws
 
 ## How It Works
 
-- **Encryption Key**: Derived from passphrase using SHA-256
-- **Challenge System**: Uses one's complement of passphrase for verification
+- **Encryption Key**: Derived from passphrase using PBKDF2 with salt and 100,000 iterations
+- **Challenge System**: Uses PBKDF2 with one's complement of passphrase for verification
 - **Password Entries**: Each entry is encrypted separately with its own IV
-- **Datastore Format**: JSON file containing cryptographic parameters, challenge, and encrypted entries
+- **Datastore Format**: JSON file containing cryptographic parameters (salt, iterations, cipher mode), challenge, and encrypted entries
 
 ## Cryptographic Details
 
 ### New Datastores
 - **Cipher**: AES-256
 - **Mode**: GCM (with authentication tags)
-- **Key Derivation**: SHA-256 of passphrase
+- **Key Derivation**: PBKDF2 with 100,000 iterations and 16-byte salt
 
-### Legacy Datastores
+### Legacy Datastores (CBC mode)
 - **Cipher**: AES-256
-- **Mode**: CBC (automatically migrated to include parameters)
-- **Backward Compatible**: Old datastores continue to work
+- **Mode**: CBC (can be migrated to GCM mode)
+- **Key Derivation**: PBKDF2 with 100,000 iterations
 
 ### Supported Modes
 The system supports two secure AES modes:

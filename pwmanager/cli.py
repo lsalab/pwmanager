@@ -26,7 +26,7 @@ def display_terminal(datastore: dict, encryption_key: bytes, search_term: str = 
     
     Args:
         datastore: The datastore dictionary containing entries and cipher_mode
-        encryption_key: The decryption key (SHA-256 digest of passphrase)
+        encryption_key: The decryption key (PBKDF2-derived from passphrase)
         search_term: Optional search term to filter entries by site name
     """
     print("\n" + "="*80)

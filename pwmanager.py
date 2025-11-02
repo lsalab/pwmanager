@@ -8,7 +8,7 @@ It supports two secure cipher modes:
 - GCM (Galois/Counter Mode): Default for new datastores, provides authenticated encryption
 - CBC (Cipher Block Chaining): Legacy mode, supported for backward compatibility
 
-The encryption key is derived from a user passphrase using SHA-256.
+The encryption key is derived from a user passphrase using PBKDF2.
 Each datastore includes cryptographic parameters (cipher and mode) for flexibility.
 """
 

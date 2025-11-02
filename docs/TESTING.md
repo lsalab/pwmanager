@@ -2,13 +2,13 @@
 
 This document describes how to run the test suite for the password manager.
 
-The password manager supports two secure cryptographic modes:
+The password manager uses PBKDF2 for key derivation and supports two secure cryptographic modes:
 - **GCM (Galois/Counter Mode)**: Default for new datastores, provides authenticated encryption
 - **CBC (Cipher Block Chaining)**: Legacy mode, supported for backward compatibility with existing datastores
 
 Insecure or unnecessary modes (ECB, CFB, OFB, CTR) have been removed to maintain security best practices.
 
-The test suite comprehensively covers all cryptographic operations, legacy migration, and edge cases.
+The test suite comprehensively covers all cryptographic operations, datastore operations, and edge cases.
 
 ## Prerequisites
 
@@ -81,7 +81,7 @@ The test suite covers:
 
 2. **Datastore Operations** (`test_datastore.py`)
    - `validate_store_path()` - Path validation
-   - `migrate_legacy_datastore()` - Legacy datastore migration
+   - `migrate_legacy_datastore()` - Legacy cipher mode migration
    - `load_datastore()` / `save_datastore()` - File operations
    - `create_backup_file()` - Backup creation
    - `verify_passphrase()` - Passphrase verification
@@ -113,7 +113,7 @@ Tests are organized by module, matching the codebase structure:
 
 ### `tests/test_datastore.py` - Datastore Operations
 - `TestValidateStorePath` - Path validation
-- `TestMigrateLegacyDatastore` - Legacy migration
+- `TestMigrateLegacyDatastore` - Legacy cipher mode migration
 - `TestDatastoreFileOperations` - File save/load/backup
 - `TestVerifyPassphrase` - Passphrase verification
 - `TestInitializeDatastore` - Datastore initialization

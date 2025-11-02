@@ -9,12 +9,10 @@ from json import loads, dumps
 
 # Import cryptographic libraries
 try:
-    from Crypto.Hash import SHA256
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
     from Crypto.Util.Padding import pad, unpad
 except ImportError:
-    from Cryptodome.Hash import SHA256
     from Cryptodome.Cipher import AES
     from Cryptodome.Random import get_random_bytes
     from Cryptodome.Util.Padding import pad, unpad
@@ -26,7 +24,8 @@ from pwmanager.datastore import (
 )
 from pwmanager.crypto import (
     AES_BLOCK_SIZE, get_random_bytes, LEGACY_CIPHER, LEGACY_CIPHER_MODE,
-    LEGACY_KEY_DERIVATION, DEFAULT_CIPHER, DEFAULT_CIPHER_MODE
+    DEFAULT_CIPHER, DEFAULT_CIPHER_MODE, PBKDF2_SALT_SIZE,
+    derive_key
 )
 
 
@@ -65,10 +64,8 @@ class TestMigrateLegacyDatastore:
         assert was_migrated is True
         assert 'cipher' in legacy_datastore
         assert 'cipher_mode' in legacy_datastore
-        assert 'key_derivation' in legacy_datastore
         assert legacy_datastore['cipher'] == LEGACY_CIPHER
         assert legacy_datastore['cipher_mode'] == LEGACY_CIPHER_MODE
-        assert legacy_datastore['key_derivation'] == LEGACY_KEY_DERIVATION
     
     def test_already_migrated_datastore(self, cbc_datastore):
         """Test that already migrated datastore is not migrated again"""
@@ -219,43 +216,14 @@ class TestEntryEncryptionDecryption:
 class TestMigration:
     """Test datastore migration from CBC to GCM"""
     
-    @pytest.fixture
-    def cbc_datastore_with_entries(self, test_key, test_challenge):
-        """Create a CBC datastore with password entries"""
-        iv = get_random_bytes(AES_BLOCK_SIZE)
-        cipher = AES.new(test_key, AES.MODE_CBC, iv=iv)
-        encrypted_challenge = cipher.encrypt(pad(test_challenge, AES.block_size))
-        
-        datastore = {
-            'cipher': 'AES',
-            'cipher_mode': 'CBC',
-            'iv': b64encode(iv).decode('utf-8'),
-            'challenge': b64encode(encrypted_challenge).decode('utf-8'),
-            'store': {}
-        }
-        
-        # Add some password entries
-        entries_data = {
-            'site1.com': {'username': 'user1', 'password': 'pass1'},
-            'site2.com': {'username': 'user2', 'password': 'pass2'},
-        }
-        
-        for site_name, entry_data in entries_data.items():
-            entry_iv = get_random_bytes(AES_BLOCK_SIZE)
-            entry_cipher = AES.new(test_key, AES.MODE_CBC, iv=entry_iv)
-            entry_json = dumps(entry_data).encode('utf-8')
-            encrypted = entry_cipher.encrypt(pad(entry_json, AES.block_size))
-            
-            datastore['store'][site_name] = {
-                'iv': b64encode(entry_iv).decode('utf-8'),
-                'data': b64encode(encrypted).decode('utf-8')
-            }
-        
-        return datastore
-    
     def test_migrate_cbc_to_gcm_success(self, temp_datastore_path, cbc_datastore_with_entries, 
-                                        test_key, test_passphrase):
+                                        test_passphrase, test_salt):
         """Test successful migration from CBC to GCM"""
+        from pwmanager.crypto import derive_key
+        
+        # Get encryption key using PBKDF2
+        test_key = derive_key(test_passphrase, test_salt)
+        
         # Save CBC datastore
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
         save_datastore(cbc_datastore_with_entries, temp_datastore_path)
@@ -287,10 +255,15 @@ class TestMigration:
             assert 'username' in decrypted
             assert 'password' in decrypted
     
-    def test_migrate_already_gcm(self, temp_datastore_path, gcm_datastore, test_key, test_passphrase):
+    def test_migrate_already_gcm(self, temp_datastore_path, gcm_datastore, test_passphrase, test_salt):
         """Test migration when datastore is already in GCM mode"""
+        from pwmanager.crypto import derive_key
+        
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
         save_datastore(gcm_datastore, temp_datastore_path)
+        
+        # Get encryption key using PBKDF2
+        test_key = derive_key(test_passphrase, test_salt)
         
         # Attempt migration
         success = migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
@@ -306,7 +279,9 @@ class TestMigration:
         save_datastore(cbc_datastore_with_entries, temp_datastore_path)
         
         wrong_passphrase = "wrong_passphrase"
-        wrong_key = SHA256.new(data=wrong_passphrase.encode('utf-8')).digest()
+        # Get salt from datastore and derive wrong key
+        salt = b64decode(cbc_datastore_with_entries['salt'])
+        wrong_key = derive_key(wrong_passphrase, salt)
         
         # Migration should fail with wrong passphrase
         with pytest.raises((ValueError, Exception)):
