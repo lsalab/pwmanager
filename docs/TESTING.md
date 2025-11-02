@@ -2,11 +2,9 @@
 
 This document describes how to run the test suite for the password manager.
 
-The password manager uses PBKDF2 for key derivation and supports two secure cryptographic modes:
-- **GCM (Galois/Counter Mode)**: Default for new datastores, provides authenticated encryption
-- **CBC (Cipher Block Chaining)**: Legacy mode, supported for backward compatibility with existing datastores
+The password manager uses PBKDF2 for key derivation (100,000 iterations with unique salt) and AES-256-GCM for authenticated encryption.
 
-Insecure or unnecessary modes (ECB, CFB, OFB, CTR) have been removed to maintain security best practices.
+Insecure or unnecessary modes (ECB, CBC, CFB, OFB, CTR) have been removed to maintain security best practices. All datastores use GCM mode for authenticated encryption with tamper detection.
 
 The test suite comprehensively covers all cryptographic operations, datastore operations, and edge cases.
 
@@ -75,19 +73,17 @@ The test suite covers:
    - `derive_key()` - Key derivation from passphrase
    - `derive_challenge()` - Challenge generation
    - `generate_random_password()` - Random password generation
-   - CBC and GCM mode encryption/decryption
+   - GCM mode encryption/decryption
    - Authentication tag handling for GCM
    - Constants validation
 
 2. **Datastore Operations** (`test_datastore.py`)
    - `validate_store_path()` - Path validation
-   - `migrate_legacy_datastore()` - Legacy cipher mode migration
    - `load_datastore()` / `save_datastore()` - File operations
    - `create_backup_file()` - Backup creation
    - `verify_passphrase()` - Passphrase verification
    - `initialize_datastore()` - New datastore creation
    - `encrypt_entry()` / `decrypt_entry()` - Entry encryption/decryption
-   - `migrate_datastore_to_gcm()` - CBC to GCM migration
 
 3. **Integration Tests** (`test_pwmanager.py`)
    - Path validation (integration)
@@ -107,18 +103,15 @@ Tests are organized by module, matching the codebase structure:
 - `TestGetAESMode` - Cipher mode conversion
 - `TestKeyDerivation` - Key and challenge derivation
 - `TestRandomPassword` - Random password generation
-- `TestCBCEncryptionDecryption` - CBC mode operations
 - `TestGCMEncryptionDecryption` - GCM mode operations
 - `TestConstants` - Cryptographic constants
 
 ### `tests/test_datastore.py` - Datastore Operations
 - `TestValidateStorePath` - Path validation
-- `TestMigrateLegacyDatastore` - Legacy cipher mode migration
 - `TestDatastoreFileOperations` - File save/load/backup
 - `TestVerifyPassphrase` - Passphrase verification
 - `TestInitializeDatastore` - Datastore initialization
 - `TestEntryEncryptionDecryption` - Entry encryption/decryption
-- `TestMigration` - CBC to GCM migration
 
 ### `tests/test_pwmanager.py` - Integration Tests
 - `TestValidateStorePath` - Path validation (integration)

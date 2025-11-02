@@ -11,19 +11,17 @@ from json import loads, dumps
 try:
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
-    from Crypto.Util.Padding import pad, unpad
 except ImportError:
     from Cryptodome.Cipher import AES
     from Cryptodome.Random import get_random_bytes
-    from Cryptodome.Util.Padding import pad, unpad
 
 from pwmanager.datastore import (
-    validate_store_path, migrate_legacy_datastore, create_backup_file,
+    validate_store_path, create_backup_file,
     load_datastore, save_datastore, verify_passphrase, initialize_datastore,
-    decrypt_entry, encrypt_entry, migrate_datastore_to_gcm
+    decrypt_entry, encrypt_entry
 )
 from pwmanager.crypto import (
-    AES_BLOCK_SIZE, get_random_bytes, LEGACY_CIPHER, LEGACY_CIPHER_MODE,
+    AES_BLOCK_SIZE, get_random_bytes,
     DEFAULT_CIPHER, DEFAULT_CIPHER_MODE, PBKDF2_SALT_SIZE,
     derive_key
 )
@@ -55,54 +53,22 @@ class TestValidateStorePath:
         assert validate_store_path('/proc/store.pws') is False
 
 
-class TestMigrateLegacyDatastore:
-    """Test migrate_legacy_datastore function"""
-    
-    def test_legacy_datastore_migration(self, legacy_datastore):
-        """Test migration of legacy datastore"""
-        was_migrated = migrate_legacy_datastore(legacy_datastore)
-        assert was_migrated is True
-        assert 'cipher' in legacy_datastore
-        assert 'cipher_mode' in legacy_datastore
-        assert legacy_datastore['cipher'] == LEGACY_CIPHER
-        assert legacy_datastore['cipher_mode'] == LEGACY_CIPHER_MODE
-    
-    def test_already_migrated_datastore(self, cbc_datastore):
-        """Test that already migrated datastore is not migrated again"""
-        original_cipher = cbc_datastore['cipher']
-        original_mode = cbc_datastore['cipher_mode']
-        was_migrated = migrate_legacy_datastore(cbc_datastore)
-        assert was_migrated is False
-        assert cbc_datastore['cipher'] == original_cipher
-        assert cbc_datastore['cipher_mode'] == original_mode
-    
-    def test_partial_legacy_datastore(self):
-        """Test datastore with only one missing field"""
-        ds1 = {'cipher': 'AES', 'iv': 'test', 'challenge': 'test'}
-        was_migrated1 = migrate_legacy_datastore(ds1)
-        assert was_migrated1 is True
-        
-        ds2 = {'cipher_mode': 'CBC', 'iv': 'test', 'challenge': 'test'}
-        was_migrated2 = migrate_legacy_datastore(ds2)
-        assert was_migrated2 is True
-
-
 class TestDatastoreFileOperations:
     """Test datastore file operations"""
     
-    def test_save_and_load_datastore(self, temp_datastore_path, cbc_datastore):
+    def test_save_and_load_datastore(self, temp_datastore_path, gcm_datastore):
         """Test saving and loading a datastore"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore, temp_datastore_path)
+        save_datastore(gcm_datastore, temp_datastore_path)
         
         assert os.path.exists(temp_datastore_path)
         loaded = load_datastore(temp_datastore_path)
-        assert loaded == cbc_datastore
+        assert loaded == gcm_datastore
     
-    def test_create_backup_file(self, temp_datastore_path, cbc_datastore):
+    def test_create_backup_file(self, temp_datastore_path, gcm_datastore):
         """Test backup file creation"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore, temp_datastore_path)
+        save_datastore(gcm_datastore, temp_datastore_path)
         
         backup_path = create_backup_file(temp_datastore_path)
         
@@ -120,18 +86,12 @@ class TestDatastoreFileOperations:
         # Verify backup content matches original
         with open(backup_path, 'r') as f:
             backup_data = loads(f.read())
-        assert backup_data == cbc_datastore
+        assert backup_data == gcm_datastore
 
 
 class TestVerifyPassphrase:
     """Test passphrase verification"""
     
-    def test_verify_correct_passphrase_cbc(self, temp_datastore_path, cbc_datastore, test_passphrase):
-        """Test verification with correct passphrase in CBC mode"""
-        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore, temp_datastore_path)
-        
-        assert verify_passphrase(cbc_datastore, test_passphrase) is True
     
     def test_verify_correct_passphrase_gcm(self, temp_datastore_path, gcm_datastore, test_passphrase):
         """Test verification with correct passphrase in GCM mode"""
@@ -140,13 +100,13 @@ class TestVerifyPassphrase:
         
         assert verify_passphrase(gcm_datastore, test_passphrase) is True
     
-    def test_verify_wrong_passphrase(self, temp_datastore_path, cbc_datastore):
+    def test_verify_wrong_passphrase(self, temp_datastore_path, gcm_datastore):
         """Test verification with wrong passphrase"""
         os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore, temp_datastore_path)
+        save_datastore(gcm_datastore, temp_datastore_path)
         
         wrong_passphrase = "wrong_passphrase"
-        assert verify_passphrase(cbc_datastore, wrong_passphrase) is False
+        assert verify_passphrase(gcm_datastore, wrong_passphrase) is False
 
 
 class TestInitializeDatastore:
@@ -172,21 +132,6 @@ class TestInitializeDatastore:
 class TestEntryEncryptionDecryption:
     """Test password entry encryption and decryption"""
     
-    def test_encrypt_decrypt_entry_cbc(self, test_key, cbc_datastore):
-        """Test encrypting and decrypting a password entry in CBC mode"""
-        username = 'testuser'
-        password = 'testpass'
-        
-        entry = encrypt_entry(username, password, test_key, cbc_datastore['cipher_mode'])
-        
-        assert 'iv' in entry
-        assert 'data' in entry
-        assert 'tag' not in entry  # CBC doesn't have tag
-        
-        decrypted = decrypt_entry(entry, test_key, cbc_datastore['cipher_mode'])
-        assert decrypted['username'] == username
-        assert decrypted['password'] == password
-    
     def test_encrypt_decrypt_entry_gcm(self, test_key, gcm_datastore):
         """Test encrypting and decrypting a password entry in GCM mode"""
         username = 'testuser'
@@ -211,83 +156,3 @@ class TestEntryEncryptionDecryption:
         
         with pytest.raises(ValueError, match='GCM mode requires authentication tag'):
             decrypt_entry(entry, test_key, gcm_datastore['cipher_mode'])
-
-
-class TestMigration:
-    """Test datastore migration from CBC to GCM"""
-    
-    def test_migrate_cbc_to_gcm_success(self, temp_datastore_path, cbc_datastore_with_entries, 
-                                        test_passphrase, test_salt):
-        """Test successful migration from CBC to GCM"""
-        from pwmanager.crypto import derive_key
-        
-        # Get encryption key using PBKDF2
-        test_key = derive_key(test_passphrase, test_salt)
-        
-        # Save CBC datastore
-        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore_with_entries, temp_datastore_path)
-        
-        # Perform migration
-        success = migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
-        assert success is True
-        
-        # Verify backup was created
-        backup_files = [f for f in os.listdir(os.path.dirname(temp_datastore_path)) 
-                       if f.endswith('.pws') and '_backup_' in f]
-        assert len(backup_files) >= 1
-        
-        # Load migrated datastore
-        migrated = load_datastore(temp_datastore_path)
-        
-        # Verify migration to GCM
-        assert migrated['cipher'] == 'AES'
-        assert migrated['cipher_mode'] == 'GCM'
-        assert 'tag' in migrated  # GCM requires tag
-        
-        # Verify entries were migrated
-        assert len(migrated['store']) == len(cbc_datastore_with_entries['store'])
-        
-        # Verify entries can be decrypted with GCM
-        for site_name, entry in migrated['store'].items():
-            assert 'tag' in entry  # GCM entries have tags
-            decrypted = decrypt_entry(entry, test_key, 'GCM')
-            assert 'username' in decrypted
-            assert 'password' in decrypted
-    
-    def test_migrate_already_gcm(self, temp_datastore_path, gcm_datastore, test_passphrase, test_salt):
-        """Test migration when datastore is already in GCM mode"""
-        from pwmanager.crypto import derive_key
-        
-        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(gcm_datastore, temp_datastore_path)
-        
-        # Get encryption key using PBKDF2
-        test_key = derive_key(test_passphrase, test_salt)
-        
-        # Attempt migration
-        success = migrate_datastore_to_gcm(temp_datastore_path, test_key, test_passphrase)
-        assert success is False
-        
-        # Verify datastore unchanged
-        loaded = load_datastore(temp_datastore_path)
-        assert loaded['cipher_mode'] == 'GCM'
-    
-    def test_migrate_wrong_passphrase(self, temp_datastore_path, cbc_datastore_with_entries):
-        """Test migration with wrong passphrase fails"""
-        os.makedirs(os.path.dirname(temp_datastore_path), exist_ok=True)
-        save_datastore(cbc_datastore_with_entries, temp_datastore_path)
-        
-        wrong_passphrase = "wrong_passphrase"
-        # Get salt from datastore and derive wrong key
-        salt = b64decode(cbc_datastore_with_entries['salt'])
-        wrong_key = derive_key(wrong_passphrase, salt)
-        
-        # Migration should fail with wrong passphrase
-        with pytest.raises((ValueError, Exception)):
-            migrate_datastore_to_gcm(temp_datastore_path, wrong_key, wrong_passphrase)
-        
-        # Verify datastore was restored from backup
-        loaded = load_datastore(temp_datastore_path)
-        assert loaded['cipher_mode'] == 'CBC'
-

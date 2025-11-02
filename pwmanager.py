@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # pylint: disable=line-too-long
 """
-Simple password manager with support for multiple cryptographic modes.
+Simple password manager with AES-256-GCM encryption.
 
-This password manager stores website passwords encrypted with AES-256.
-It supports two secure cipher modes:
-- GCM (Galois/Counter Mode): Default for new datastores, provides authenticated encryption
-- CBC (Cipher Block Chaining): Legacy mode, supported for backward compatibility
+This password manager stores website passwords encrypted with AES-256 using
+GCM (Galois/Counter Mode) for authenticated encryption.
 
-The encryption key is derived from a user passphrase using PBKDF2.
-Each datastore includes cryptographic parameters (cipher and mode) for flexibility.
+The encryption key is derived from a user passphrase using PBKDF2 with 100,000 iterations
+and a unique salt per datastore. Each datastore includes cryptographic parameters
+(cipher mode, salt, iterations).
 """
 
 import sys
@@ -17,7 +16,7 @@ import argparse
 import os
 
 from pwmanager.datastore import validate_store_path
-from pwmanager.cli import terminal_mode, migration_mode
+from pwmanager.cli import terminal_mode
 from pwmanager.gui.main_window import create_main_window
 
 
@@ -32,7 +31,6 @@ Examples:
   %(prog)s --no-gui           # Display passwords in terminal mode
   %(prog)s -s mystore.pws     # Use a different datastore file
   %(prog)s --no-gui --search github  # Search for entries containing "github"
-  %(prog)s --migrate          # Migrate CBC datastore to GCM mode
         '''
     )
     parser.add_argument('-s', '--store', 
@@ -42,8 +40,6 @@ Examples:
                        help='Run in terminal mode (no GUI)')
     parser.add_argument('--search', type=str,
                        help='Search for entries containing this term (terminal mode only)')
-    parser.add_argument('--migrate', action='store_true',
-                       help='Migrate CBC (legacy) datastore to GCM mode (creates backup)')
     
     args = parser.parse_args()
     
@@ -58,10 +54,6 @@ def main():
     """Main entry point"""
     
     args = parse_args()
-    
-    if args.migrate:
-        migration_mode(args.store)
-        return
     
     if args.no_gui:
         terminal_mode(args.store, args.search)

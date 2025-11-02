@@ -11,8 +11,8 @@ from json import loads
 from base64 import b64decode
 
 from pwmanager.datastore import (
-    load_datastore, save_datastore, migrate_legacy_datastore,
-    decrypt_entry, migrate_datastore_to_gcm, verify_passphrase,
+    load_datastore, save_datastore,
+    decrypt_entry, verify_passphrase,
     get_encryption_key_from_datastore
 )
 
@@ -21,8 +21,7 @@ def display_terminal(datastore: dict, encryption_key: bytes, search_term: str = 
     """
     Display passwords in terminal mode.
     
-    Decrypts all entries using the datastore's specified cipher mode
-    (supports GCM with authentication tags and CBC with padding).
+    Decrypts all entries using GCM mode with authentication tags.
     
     Args:
         datastore: The datastore dictionary containing entries and cipher_mode
@@ -73,9 +72,8 @@ def terminal_mode(store_path: str, search_term: str = None):
     """
     Run password manager in terminal mode.
     
-    Loads and unlocks a datastore, then displays entries. Supports both
-    GCM and CBC cipher modes. Legacy datastores are automatically migrated
-    to include cryptographic parameters.
+    Loads and unlocks a datastore, then displays entries. Uses GCM cipher mode
+    with PBKDF2 key derivation (100,000 iterations).
     
     Args:
         store_path: Path to the datastore file
@@ -93,10 +91,6 @@ def terminal_mode(store_path: str, search_term: str = None):
     try:
         datastore = load_datastore(store_path)
         
-        was_migrated = migrate_legacy_datastore(datastore)
-        if was_migrated:
-            save_datastore(datastore, store_path)
-        
         if not verify_passphrase(datastore, passphrase):
             sys.stderr.write('ERROR: Incorrect passphrase\n')
             sys.exit(1)
@@ -113,45 +107,4 @@ def terminal_mode(store_path: str, search_term: str = None):
     print('Datastore unlocked successfully!')
     
     display_terminal(datastore, encryption_key, search_term)
-
-
-def migration_mode(store_path: str):
-    """
-    Run password manager in migration mode.
-    
-    Migrates a CBC (legacy) datastore to GCM mode, creating a backup
-    of the original file. Requires the passphrase to decrypt and verify.
-    
-    Args:
-        store_path: Path to the datastore file to migrate
-    """
-    if not os.path.exists(store_path):
-        sys.stderr.write(f"ERROR: Datastore not found at {store_path}\n")
-        sys.exit(1)
-    
-    try:
-        passphrase = getpass.getpass("Enter passphrase: ")
-    except (EOFError, KeyboardInterrupt):
-        sys.exit(0)
-    
-    try:
-        datastore = load_datastore(store_path)
-        migrate_legacy_datastore(datastore)
-        
-        encryption_key = get_encryption_key_from_datastore(datastore, passphrase)
-        
-        success = migrate_datastore_to_gcm(store_path, encryption_key, passphrase)
-        if success:
-            print('Migration completed successfully!')
-        else:
-            print('Migration skipped (datastore already in GCM mode)')
-    except ValueError as e:
-        sys.stderr.write(f'ERROR: {str(e)}\n')
-        sys.exit(1)
-    except IOError as e:
-        sys.stderr.write(f'ERROR: {str(e)}\n')
-        sys.exit(1)
-    except Exception as e:
-        sys.stderr.write(f'ERROR: Migration failed - {str(e)}\n')
-        sys.exit(1)
 

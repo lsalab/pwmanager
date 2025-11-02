@@ -14,12 +14,12 @@ from base64 import b64decode
 from copy import deepcopy
 
 from pwmanager.datastore import (
-    load_datastore, save_datastore, migrate_legacy_datastore,
-    decrypt_entry, encrypt_entry, migrate_datastore_to_gcm,
+    load_datastore, save_datastore,
+    decrypt_entry, encrypt_entry,
     verify_passphrase, get_encryption_key_from_datastore
 )
 from pwmanager.gui.dialogs import (
-    InitialConfig, AskPassphrase, MigrateDialog, PasswordDialog
+    InitialConfig, AskPassphrase, PasswordDialog
 )
 
 # Constants for password actions
@@ -140,10 +140,6 @@ def create_main_window(store_path: str):
         
         datastore = load_datastore(store_path)
         
-        was_migrated = migrate_legacy_datastore(datastore)
-        if was_migrated:
-            save_datastore(datastore, store_path)
-        
         # Verify passphrase
         if not verify_passphrase(datastore, ask_passphrase.passphrase):
             sys.stderr.write('Incorrect passphrase\r\nERROR: Unable to unlock datastore\r\n\r\n')
@@ -195,12 +191,7 @@ def create_main_window(store_path: str):
     search_entry = ttk.Entry(master=toolbar, width=32, textvariable=search_var)
     search_entry.pack(side=tk.LEFT, padx=2)
     
-    # Migration button - only show if datastore is in CBC mode
-    migrate_button = None
     cipher_mode = datastore['cipher_mode']
-    if cipher_mode == 'CBC':
-        migrate_button = ttk.Button(toolbar, text='Migrate to GCM', width=15)
-        migrate_button.pack(side=tk.LEFT, padx=2, pady=2)
     
     copy_username_button = ttk.Button(toolbar, text='Copy username', width=12)
     copy_username_button.pack(side=tk.RIGHT, padx=2, pady=2)
@@ -226,45 +217,6 @@ def create_main_window(store_path: str):
     password_list_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
     list_frame.pack(fill=tk.BOTH, expand=1, padx=4, pady=4)
     
-    migration_successful = False  # Track if migration succeeded
-    
-    def handle_migration():
-        """Handle migration of datastore from CBC to GCM"""
-        nonlocal migration_successful, datastore, encryption_key
-        
-        migrate_dialog = MigrateDialog(root)
-        root.wait_window(migrate_dialog.top)
-        
-        if migrate_dialog.passphrase is None:
-            return  # User cancelled
-        
-        try:
-            # Verify passphrase
-            if not verify_passphrase(datastore, migrate_dialog.passphrase):
-                mbox.showerror('Migration Failed', 'Incorrect passphrase')
-                return
-            
-            # Get encryption key using datastore's key derivation method
-            migration_key = get_encryption_key_from_datastore(datastore, migrate_dialog.passphrase)
-            
-            # Perform migration
-            success = migrate_datastore_to_gcm(store_path, migration_key, migrate_dialog.passphrase)
-            
-            if success:
-                # Reload the datastore from disk to get the migrated GCM version
-                datastore = load_datastore(store_path)
-                
-                migration_successful = True
-                mbox.showinfo('Migration Successful', 
-                            'Datastore migrated to GCM mode successfully!\n'
-                            'A backup has been created.\n\n'
-                            'Please restart the application to continue.')
-                root.quit()
-            else:
-                mbox.showinfo('Migration Skipped', 'Datastore is already in GCM mode')
-        except Exception as e:
-            mbox.showerror('Migration Failed', f'Migration failed: {str(e)}')
-    
     # Configure button commands
     add_button.config(command=lambda: handle_password(root, datastore, encryption_key, password_list_view, PASSWORD_ACTION_ADD))
     delete_button.config(command=lambda: handle_password(root, datastore, encryption_key, password_list_view, PASSWORD_ACTION_DELETE))
@@ -272,16 +224,11 @@ def create_main_window(store_path: str):
     copy_username_button.config(command=lambda: copy_to_clipboard(root, password_list_view, CLIPBOARD_COPY_USERNAME))
     copy_password_button.config(command=lambda: copy_to_clipboard(root, password_list_view, CLIPBOARD_COPY_PASSWORD))
     
-    if migrate_button is not None:
-        migrate_button.config(command=handle_migration)
-    
     search_var.trace('w', lambda unused_var, unused_idx, unused_mode, ds=datastore, key=encryption_key, lst=password_list_view, search_var=search_var: search_callback(ds, key, lst, search_var))
     
     root.mainloop()
     
-    # Only save if migration didn't happen (migration already saves the datastore)
-    if not migration_successful:
-        save_datastore(datastore, store_path)
+    save_datastore(datastore, store_path)
 
 
 def save_and_exit(datastore: dict, store_path='./data/store.pws'):

@@ -1,18 +1,16 @@
 # pwmanager
 
-A simple Tk-based password manager with support for multiple cryptographic modes.
+A simple Tk-based password manager with AES-256-GCM encryption.
 
 ## Features
 
-- **Secure Password Storage**: Passwords are encrypted using AES-256
-- **Multiple Cipher Modes**: 
-  - Default: GCM (Galois/Counter Mode) - Authenticated encryption (most secure)
-  - Legacy: CBC (Cipher Block Chaining) - Backward compatibility
-- **Automatic Migration**: Legacy CBC datastores are automatically detected and migrated
+- **Secure Password Storage**: Passwords are encrypted using AES-256-GCM
+- **Authenticated Encryption**: GCM (Galois/Counter Mode) provides authenticated encryption with tamper detection
+- **PBKDF2 Key Derivation**: Secure key derivation with 100,000 iterations and unique salt
 - **Graphical User Interface**: Easy-to-use Tkinter-based GUI
 - **Terminal Mode**: Command-line interface for scriptable access
 - **Challenge-Based Authentication**: Passphrase verification without storing keys
-- **Cryptographic Parameters**: Datastores include cipher and mode information for flexibility
+- **Cryptographic Parameters**: Datastores include cipher mode, salt, and iteration count
 
 ## Usage
 
@@ -49,20 +47,12 @@ python3 pwmanager.py -s /path/to/datastore.pws
 
 ## Cryptographic Details
 
-### New Datastores
+### Datastores
 - **Cipher**: AES-256
-- **Mode**: GCM (with authentication tags)
+- **Mode**: GCM (Galois/Counter Mode) with authentication tags
 - **Key Derivation**: PBKDF2 with 100,000 iterations and 16-byte salt
 
-### Legacy Datastores (CBC mode)
-- **Cipher**: AES-256
-- **Mode**: CBC (can be migrated to GCM mode)
-- **Key Derivation**: PBKDF2 with 100,000 iterations
-
-### Supported Modes
-The system supports two secure AES modes:
-- **GCM**: Galois/Counter Mode - Authenticated encryption (default for new datastores)
-- **CBC**: Cipher Block Chaining - Legacy mode (for backward compatibility with existing datastores)
+All datastores use GCM mode for authenticated encryption, providing both confidentiality and integrity protection.
 
 ## Dependencies
 
@@ -89,6 +79,6 @@ pip install pycryptodome
 ## Security Notes
 
 - GCM mode provides authenticated encryption, protecting against tampering
-- Each password entry uses a unique IV (Initialization Vector)
+- Each password entry uses a unique nonce (IV)
 - The passphrase is never stored - only the encrypted challenge
-- Legacy CBC mode is supported for backward compatibility but GCM is recommended for new datastores
+- PBKDF2 key derivation uses 100,000 iterations with unique salt per datastore
