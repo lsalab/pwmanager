@@ -1,0 +1,30 @@
+[project]
+name = "pwmanager"
+version = "1.0.0"
+description = "Simple password manager with support for multiple cryptographic modes"
+requires-python = ">=3.8"
+dependencies = [
+    "pycryptodome>=3.15.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pycryptodome>=3.15.0",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "crypto: marks tests related to cryptography",
+]
+

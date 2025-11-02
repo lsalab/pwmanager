@@ -66,7 +66,7 @@ The system supports two secure AES modes:
 
 ## Dependencies
 
-+ Python >= 3.7
++ Python >= 3.8
 + PyCryptodome or PyCryptodomex
 + Tkinter (usually included with Python)
 
